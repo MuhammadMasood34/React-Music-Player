@@ -78,7 +78,6 @@ import Trending from "./trending";
 import Feed from "./feed";
 import Sidebar from "../components/sidebar";
 import Login from "./auth/login";
-import WebPlayback from "../components/WebPlayback.jsx";
 
 
 
@@ -131,7 +130,6 @@ export default function Home() {
                     <Route path="/feed" element={<Feed />} />
                 </Routes>
             </div>
-            <WebPlayback token={token} />
         </Router>
     );
 }

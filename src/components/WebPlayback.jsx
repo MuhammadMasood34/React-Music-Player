@@ -60,27 +60,39 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
 
             // NEW: start playback as soon as player is ready
             spotifyPlayer.addListener("ready", async ({ device_id }) => {
+                console.log("=== PLAYER READY ===");
                 console.log("Player ready with Device ID:", device_id);
+                console.log("Playlist URIs available:", playlistUris?.length);
+                
                 setDeviceId(device_id);
                 setIsPlayerReady(true);
 
                 // Transfer playback to this device
-                await fetch(`https://api.spotify.com/v1/me/player`, {
-                    method: 'PUT',
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        "device_ids": [device_id],
-                        "play": false
-                    })
-                });
+                try {
+                    const response = await fetch(`https://api.spotify.com/v1/me/player`, {
+                        method: 'PUT',
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            "device_ids": [device_id],
+                            "play": false
+                        })
+                    });
+                    console.log("Playback transfer response:", response.status);
+                } catch (err) {
+                    console.error("Error transferring playback:", err);
+                }
+                
                 console.log("Playback transferred to this device");
 
                 // NEW: start playback immediately after device is ready
                 if (playlistUris && playlistUris.length > 0) {
+                    console.log("Starting playback with playlist URIs...");
                     await startPlayback(device_id);
+                } else {
+                    console.log("No playlist URIs available for auto-start");
                 }
 
                 if (onReady) onReady(device_id);
@@ -89,7 +101,17 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
             // FIX: use spotifyPlayer (not player which is null here)
             // NEW: also mirrors the pattern from the snippet — setState(state) equivalent
             spotifyPlayer.addListener("player_state_changed", (state) => {
-                if (!state) return;
+                if (!state) {
+                    console.warn("Empty state received in player_state_changed");
+                    return;
+                }
+
+                console.log("Player state changed event fired", {
+                    track: state.track_window?.current_track?.name,
+                    paused: state.paused,
+                    position: state.position,
+                    duration: state.duration
+                });
 
                 // NEW: update refs (mirrors snippet's setState(state))
                 hasInitialState.current = true;
@@ -203,16 +225,20 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
 
 
     useEffect(() => {
-        if (!isPaused && isPlayerReady && player && duration > 0) {
+        console.log("Progress effect triggered:", { isPaused, isPlayerReady, duration, hasPlayerRef: !!playerRef.current });
+        
+        if (!isPaused && isPlayerReady && playerRef.current && duration > 0) {
+            console.log("Starting progress updates...");
             startSmoothProgressUpdates();
         } else {
+            console.log("Stopping progress updates (conditions not met)");
             stopProgressUpdates();
         }
 
         return () => {
             stopProgressUpdates();
         };
-    }, [isPaused, isPlayerReady, player, duration]);
+    }, [isPaused, isPlayerReady, duration]);
 
 
     // NEW: startPlayback — wraps /me/player/play, called on ready
@@ -247,31 +273,58 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
 
 
     const startSmoothProgressUpdates = () => {
-        if (progressIntervalRef.current) return;
+        if (progressIntervalRef.current) {
+            console.log("Progress interval already running, skipping...");
+            return;
+        }
+
+        console.log("Starting smooth progress updates...");
 
         progressIntervalRef.current = setInterval(async () => {
             const activePlayer = playerRef.current;
-            if (!activePlayer || isPaused || isSeekingRef.current) return;
+            
+            if (!activePlayer) {
+                console.warn("No active player in progress update");
+                return;
+            }
+            
+            if (isPaused || isSeekingRef.current) {
+                return;
+            }
 
             try {
-                if (!activePlayer) return;
                 const state = await activePlayer.getCurrentState();
-                if (state && !state.paused && !isSeekingRef.current) {
-                    const newPosition = state.position;
-                    setCurrentPosition(prev => {
-                        if (Math.abs(newPosition - prev) > 50) return newPosition;
-                        return prev;
-                    });
+                
+                if (!state) {
+                    console.warn("No state returned from getCurrentState");
+                    return;
+                }
+                
+                if (state.paused || isSeekingRef.current) {
+                    return;
+                }
 
-                    if (state.track_window) {
-                        var current_track = state.track_window.current_track;
-                        var next_track = state.track_window.next_tracks[0];
+                const newPosition = state.position;
+                
+                // Update position in state
+                setCurrentPosition(prev => {
+                    // Update if difference is significant or this is first update
+                    if (prev === 0 || Math.abs(newPosition - prev) > 50) {
+                        console.log(`Progress: ${Math.floor(newPosition / 1000)}s`);
+                        return newPosition;
+                    }
+                    return prev;
+                });
 
-                        if (Math.floor(Date.now() / 1000) % 30 === 0) {
-                            console.log('Currently Playing (progress update):', current_track?.name);
-                            if (next_track) {
-                                console.log('Playing Next (progress update):', next_track?.name);
-                            }
+                if (state.track_window) {
+                    var current_track = state.track_window.current_track;
+                    var next_track = state.track_window.next_tracks[0];
+
+                    // Log every 30 seconds
+                    if (Math.floor(Date.now() / 1000) % 30 === 0) {
+                        console.log('Currently Playing (progress update):', current_track?.name);
+                        if (next_track) {
+                            console.log('Playing Next (progress update):', next_track?.name);
                         }
                     }
                 }
@@ -279,11 +332,14 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
                 console.warn("Error getting player state in progress update:", err);
             }
         }, 500);
+        
+        console.log("Progress interval started with ID:", progressIntervalRef.current);
     };
 
 
     const stopProgressUpdates = () => {
         if (progressIntervalRef.current) {
+            console.log("Stopping progress updates, clearing interval ID:", progressIntervalRef.current);
             clearInterval(progressIntervalRef.current);
             progressIntervalRef.current = null;
         }
@@ -393,77 +449,118 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
 
 
     const togglePlay = async () => {
-        if (!playerRef.current || !isPlayerReady) {
+        console.log("togglePlay called, playerRef.current:", playerRef.current ? "EXISTS" : "NULL", "isPlayerReady:", isPlayerReady);
+        
+        if (!playerRef.current) {
+            console.error("Player reference is null");
+            return;
+        }
+
+        if (!isPlayerReady) {
             console.warn("Player not ready yet");
             return;
         }
 
         try {
-            // Check current state first
+            console.log("Attempting to get player state before toggle...");
             const state = await playerRef.current.getCurrentState();
             
+            console.log("Current state:", {
+                hasTrack: !!state?.track_window?.current_track,
+                trackName: state?.track_window?.current_track?.name,
+                paused: state?.paused
+            });
+
             if (!state || !state.track_window?.current_track) {
                 console.warn("No track is currently available to play");
                 return;
             }
 
-            // Toggle playback
+            console.log("Calling togglePlay on player...");
             await playerRef.current.togglePlay();
-            console.log("Toggle play successful");
+            console.log("Toggle play successful!");
             
         } catch (error) {
-            console.error("Error toggling play:", error);
+            console.error("Error in togglePlay:", error);
         }
     };
 
-    const nextTrack = () => {
-        if (!playerRef.current || !isPlayerReady) {
+    const nextTrack = async () => {
+        console.log("nextTrack called");
+        
+        if (!playerRef.current) {
+            console.error("Player reference is null");
+            return;
+        }
+
+        if (!isPlayerReady) {
             console.warn("Player not ready yet");
             return;
         }
 
-        playerRef.current.nextTrack()
-            .then(async () => {
-                console.log("Next track requested");
-                setCurrentPosition(0);
-                lastPositionRef.current = 0;
+        try {
+            console.log("Calling nextTrack...");
+            await playerRef.current.nextTrack();
+            
+            console.log("Next track requested successfully");
+            setCurrentPosition(0);
+            lastPositionRef.current = 0;
 
-                const state = await playerRef.current.getCurrentState();
-                if (state && state.track_window) {
-                    var current_track = state.track_window.current_track;
-                    var next_track = state.track_window.next_tracks[0];
-                    console.log('After next track - Currently Playing:', current_track?.name);
-                    console.log('After next track - Playing Next:', next_track?.name);
+            setTimeout(async () => {
+                try {
+                    const state = await playerRef.current.getCurrentState();
+                    if (state && state.track_window) {
+                        var current_track = state.track_window.current_track;
+                        var next_track = state.track_window.next_tracks[0];
+                        console.log('After next track - Currently Playing:', current_track?.name);
+                        console.log('After next track - Playing Next:', next_track?.name);
+                    }
+                } catch (err) {
+                    console.error("Error fetching state after next track:", err);
                 }
-            })
-            .catch(error => {
-                console.error("Error switching to next track:", error);
-            });
+            }, 500);
+        } catch (error) {
+            console.error("Error switching to next track:", error);
+        }
     };
 
-    const prevTrack = () => {
-        if (!playerRef.current || !isPlayerReady) {
+    const prevTrack = async () => {
+        console.log("prevTrack called");
+        
+        if (!playerRef.current) {
+            console.error("Player reference is null");
+            return;
+        }
+
+        if (!isPlayerReady) {
             console.warn("Player not ready yet");
             return;
         }
 
-        playerRef.current.previousTrack()
-            .then(async () => {
-                console.log("Previous track requested");
-                setCurrentPosition(0);
-                lastPositionRef.current = 0;
+        try {
+            console.log("Calling previousTrack...");
+            await playerRef.current.previousTrack();
+            
+            console.log("Previous track requested successfully");
+            setCurrentPosition(0);
+            lastPositionRef.current = 0;
 
-                const state = await playerRef.current.getCurrentState();
-                if (state && state.track_window) {
-                    var current_track = state.track_window.current_track;
-                    var next_track = state.track_window.next_tracks[0];
-                    console.log('After previous track - Currently Playing:', current_track?.name);
-                    console.log('After previous track - Playing Next:', next_track?.name);
+            setTimeout(async () => {
+                try {
+                    const state = await playerRef.current.getCurrentState();
+                    if (state && state.track_window) {
+                        var current_track = state.track_window.current_track;
+                        var next_track = state.track_window.next_tracks[0];
+                        console.log('After previous track - Currently Playing:', current_track?.name);
+                        console.log('After previous track - Playing Next:', next_track?.name);
+                    }
+                } catch (err) {
+                    console.error("Error fetching state after previous track:", err);
                 }
-            })
-            .catch(error => {
-                console.error("Error switching to previous track:", error);
-            });
+            }, 500);
+        } catch (error) {
+            console.error("Error switching to previous track:", error);
+        }
     };
 
     const formatDuration = (ms) => {
