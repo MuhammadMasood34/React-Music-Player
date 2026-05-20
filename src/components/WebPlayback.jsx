@@ -254,7 +254,8 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
             if (!activePlayer || isPaused || isSeekingRef.current) return;
 
             try {
-                const state = await activePlayer?.getCurrentState();
+                if (!activePlayer) return;
+                const state = await activePlayer.getCurrentState();
                 if (state && !state.paused && !isSeekingRef.current) {
                     const newPosition = state.position;
                     setCurrentPosition(prev => {
@@ -275,7 +276,7 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
                     }
                 }
             } catch (err) {
-                stopProgressUpdates();
+                console.warn("Error getting player state in progress update:", err);
             }
         }, 500);
     };
@@ -291,7 +292,7 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
 
     // UPDATED: handleProgressBarClick now uses handleSeek(percent) internally
     const handleProgressBarClick = async (e) => {
-        if (!player || !isPlayerReady) return;
+        if (!player || !isPlayerReady || !lastState.current) return;
 
         const progressBar = e.currentTarget;
         const rect = progressBar.getBoundingClientRect();
@@ -310,12 +311,14 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
             setCurrentPosition(seekPosition);
             lastPositionRef.current = seekPosition;
 
-            const state = await player.getCurrentState();
-            if (state && state.track_window) {
-                var current_track = state.track_window.current_track;
-                var next_track = state.track_window.next_tracks[0];
-                console.log('After seek - Currently Playing:', current_track?.name);
-                console.log('After seek - Playing Next:', next_track?.name);
+            if (playerRef.current) {
+                const state = await playerRef.current.getCurrentState();
+                if (state && state.track_window) {
+                    var current_track = state.track_window.current_track;
+                    var next_track = state.track_window.next_tracks[0];
+                    console.log('After seek - Currently Playing:', current_track?.name);
+                    console.log('After seek - Playing Next:', next_track?.name);
+                }
             }
 
             setTimeout(() => {
@@ -365,12 +368,16 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
 
                 if (playerRef.current) {
                     setTimeout(async () => {
-                        const state = await playerRef.current?.getCurrentState();
-                        if (state && state.track_window) {
-                            var current_track = state.track_window.current_track;
-                            var next_track = state.track_window.next_tracks[0];
-                            console.log('After playback start - Currently Playing:', current_track?.name);
-                            console.log('After playback start - Playing Next:', next_track?.name);
+                        try {
+                            const state = await playerRef.current?.getCurrentState();
+                            if (state && state.track_window) {
+                                var current_track = state.track_window.current_track;
+                                var next_track = state.track_window.next_tracks[0];
+                                console.log('After playback start - Currently Playing:', current_track?.name);
+                                console.log('After playback start - Playing Next:', next_track?.name);
+                            }
+                        } catch (err) {
+                            console.warn("Error fetching state after play:", err);
                         }
                     }, 1000);
                 }
@@ -385,34 +392,43 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
     };
 
 
-    const togglePlay = () => {
-        if (!player || !isPlayerReady) {
+    const togglePlay = async () => {
+        if (!playerRef.current || !isPlayerReady) {
             console.warn("Player not ready yet");
             return;
         }
 
-        player.togglePlay()
-            .then(() => {
-                console.log("Toggle play successful");
-            })
-            .catch(error => {
-                console.error("Error toggling play:", error);
-            });
+        try {
+            // Check current state first
+            const state = await playerRef.current.getCurrentState();
+            
+            if (!state || !state.track_window?.current_track) {
+                console.warn("No track is currently available to play");
+                return;
+            }
+
+            // Toggle playback
+            await playerRef.current.togglePlay();
+            console.log("Toggle play successful");
+            
+        } catch (error) {
+            console.error("Error toggling play:", error);
+        }
     };
 
     const nextTrack = () => {
-        if (!player || !isPlayerReady) {
+        if (!playerRef.current || !isPlayerReady) {
             console.warn("Player not ready yet");
             return;
         }
 
-        player.nextTrack()
+        playerRef.current.nextTrack()
             .then(async () => {
                 console.log("Next track requested");
                 setCurrentPosition(0);
                 lastPositionRef.current = 0;
 
-                const state = await player.getCurrentState();
+                const state = await playerRef.current.getCurrentState();
                 if (state && state.track_window) {
                     var current_track = state.track_window.current_track;
                     var next_track = state.track_window.next_tracks[0];
@@ -426,18 +442,18 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
     };
 
     const prevTrack = () => {
-        if (!player || !isPlayerReady) {
+        if (!playerRef.current || !isPlayerReady) {
             console.warn("Player not ready yet");
             return;
         }
 
-        player.previousTrack()
+        playerRef.current.previousTrack()
             .then(async () => {
                 console.log("Previous track requested");
                 setCurrentPosition(0);
                 lastPositionRef.current = 0;
 
-                const state = await player.getCurrentState();
+                const state = await playerRef.current.getCurrentState();
                 if (state && state.track_window) {
                     var current_track = state.track_window.current_track;
                     var next_track = state.track_window.next_tracks[0];
