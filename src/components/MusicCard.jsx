@@ -321,8 +321,21 @@
 import { useState, useEffect, useRef } from 'react';
 import apiClient from '../../spotify';
 
+const normalizeTrack = (item) => {
+  const track = item.item || item.track || item;
+
+  return {
+    id: track.id,
+    name: track.name,
+    uri: track.uri,
+    durationMs: track.duration_ms || track.durationMs,
+    artistName: track.artists?.[0]?.name || track.artistName || 'Unknown Artist',
+    albumImageUrl: track.album?.images?.[2]?.url || track.album?.images?.[0]?.url || track.albumImageUrl,
+  };
+};
+
 // ADDED: New props for Solution 1
-const MusicCard = ({ playlistId, token, onTrackSelect, currentDeviceId }) => {
+const MusicCard = ({ playlistId, token, onTrackSelect, currentDeviceId, onPlaylistLoaded, sharedTracks = [], canControlRoom = false }) => {
   const [activeTrack, setActiveTrack] = useState(null);
   const [tracksData, setTracksData] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -379,6 +392,17 @@ const MusicCard = ({ playlistId, token, onTrackSelect, currentDeviceId }) => {
     }
   }, [playlistId]);
 
+  useEffect(() => {
+    const uris = tracksData.map(item => {
+      const track = item.item || item.track || item;
+      return track.uri;
+    }).filter(Boolean);
+
+    if (uris.length > 0) {
+      onPlaylistLoaded?.(uris, tracksData.map(normalizeTrack));
+    }
+  }, [onPlaylistLoaded, tracksData]);
+
   // Cleanup audio on component unmount
   useEffect(() => {
     return () => {
@@ -388,41 +412,6 @@ const MusicCard = ({ playlistId, token, onTrackSelect, currentDeviceId }) => {
       }
     };
   }, []);
-
-  // ADDED: New function for Spotify Web Playback (Solution 1)
-  const handleSpotifyPlay = (track) => {
-    // Get the Spotify URI from the track
-    const trackUri = track.item?.uri || track.track?.uri || track.uri;
-    const trackName = track.item?.name || track.track?.name || track.name;
-
-    // console.log("Attempting to play with Spotify Web Playback:", trackName);
-    // console.log("Track URI:", trackUri);
-    // console.log("Current Device ID:", currentDeviceId);
-
-    // Check if we have a device to play on
-    if (!currentDeviceId) {
-      // console.warn("No device available. WebPlayback not ready yet.");
-      alert("Player is not ready yet. Please wait a moment and try again.");
-      return;
-    }
-
-    // Check if we have a valid track URI
-    if (!trackUri || !trackUri.startsWith('spotify:track:')) {
-      // console.warn("No valid Spotify URI for:", trackName);
-      alert(`Cannot play "${trackName}" - No valid Spotify track URI found.`);
-      return;
-    }
-
-    // Send the track info to parent component (PlayerContainer)
-    if (onTrackSelect) {
-      onTrackSelect(trackUri, currentDeviceId);
-      setActiveTrack(track.item?.id || track.track?.id || track.id);
-      // Note: isPlaying will be managed by WebPlayback component
-    } else {
-      // console.error("onTrackSelect prop is not provided");
-      alert("Playback function not available. Please check component setup.");
-    }
-  };
 
   // MODIFIED: Updated handlePlayTrack to work with both preview URLs and Spotify Web Playback
   const handlePlayTrack = (track) => {
@@ -437,18 +426,19 @@ const MusicCard = ({ playlistId, token, onTrackSelect, currentDeviceId }) => {
     // console.log("Device ID available?", !!currentDeviceId);
     // console.log("onTrackSelect available?", !!onTrackSelect);
 
-    // PRIORITY 1: Use Spotify Web Playback if available
-    if (token && trackUri && currentDeviceId && onTrackSelect) {
+    // PRIORITY 1: Use Spotify Web Playback for full tracks. The click handler can
+    // wait for the browser device if the SDK is still finishing its connection.
+    if (trackUri && onTrackSelect && token) {
       console.log("🎵 USING SPOTIFY WEB PLAYBACK for:", trackName);
 
       // Extract all playlist URIs
-      const allPlaylistUris = tracksData.map(item => {
+      const allPlaylistUris = tracksToDisplay.map(item => {
         const t = item.item || item.track || item;
         return t.uri;
       }).filter(uri => uri);
 
 
-      onTrackSelect(trackUri, currentDeviceId);
+      onTrackSelect(trackUri, currentDeviceId, allPlaylistUris, normalizeTrack(track));
       setActiveTrack(track.item?.id || track.track?.id || track.id);
       return;
     }
@@ -463,81 +453,7 @@ const MusicCard = ({ playlistId, token, onTrackSelect, currentDeviceId }) => {
     console.error(`Cannot play "${trackName}": No Spotify Web Playback available and no preview URL`);{
       alert(`Cannot play "${trackName}".\n\nMake sure you have:\n1. Spotify Premium account\n2. Spotify app open on your device\n3. WebPlayback SDK properly connected`);
     };
-
-    // // Check if it's a Spotify track link instead of preview URL
-    // if (previewUrl.includes('open.spotify.com') || previewUrl.includes('spotify:track:')) {
-    //   // console.error("This is a Spotify track link, not a preview URL:", previewUrl);
-    //   alert(`Cannot play "${trackName}" - This is a Spotify track link, not a playable audio file.\n\nTo play full tracks, you would need Spotify Premium and the Web Playback SDK.`);
-    //   return;
-    // }
-
-    // // Check if URL is a valid audio file
-    // if (!previewUrl.startsWith('https://') || !previewUrl.includes('.mp3')) {
-    //   // console.error("Invalid audio URL format:", previewUrl);
-    //   alert("Invalid audio URL format - not an MP3 file");
-    //   return;
-    // }
-
-    // Stop current playing audio
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
-      setIsPlaying(false);
-    }
-
-    // Create new audio instance
-    const audio = new Audio();
-
-    // Set up error handling
-    audio.addEventListener('error', (e) => {
-      // console.error("Audio error event:", e);
-      // console.error("Audio error code:", audio.error?.code);
-      // console.error("Audio error message:", audio.error?.message);
-
-      let errorMessage = "Failed to play track. ";
-      if (!previewUrl) {
-        errorMessage = "No preview URL available for this track.";
-      } else if (audio.error?.code === 4) {
-        errorMessage = "The audio format is not supported by your browser.";
-      } else {
-        errorMessage += `Error code: ${audio.error?.code}`;
-      }
-      alert(errorMessage);
-      setIsPlaying(false);
-      setActiveTrack(null);
-      audioRef.current = null;
-    });
-
-    // Set the source
-    audio.src = previewUrl;
-    audioRef.current = audio;
-
-    // Try to play
-    const playPromise = audio.play();
-
-    if (playPromise !== undefined) {
-      playPromise
-        .then(() => {
-          setIsPlaying(true);
-          setActiveTrack(track.item?.id || track.track?.id || track.id);
-          // console.log("Successfully playing preview for:", trackName);
-        })
-        .catch(error => {
-          // console.error("Play promise rejected:", error);
-          alert(`Cannot play "${trackName}": ${error.message}`);
-          setIsPlaying(false);
-          setActiveTrack(null);
-          audioRef.current = null;
-        });
-    }
-
-    // Handle audio end
-    audio.addEventListener('ended', () => {
-      // console.log("Audio ended");
-      setIsPlaying(false);
-      setActiveTrack(null);
-      audioRef.current = null;
-    });
+    return;
   };
 
   const stopPlayback = () => {
@@ -549,34 +465,19 @@ const MusicCard = ({ playlistId, token, onTrackSelect, currentDeviceId }) => {
     }
   };
 
-  if (loading) {
+  const tracksToDisplay = sharedTracks.length > 0 ? sharedTracks : tracksData;
+
+  if (loading && tracksToDisplay.length === 0) {
     return <div className="text-white">Loading...</div>;
   }
 
-  if (error) {
+  if (error && tracksToDisplay.length === 0) {
     return <div className="text-red-500">{error}</div>;
   }// In your MusicCard component, right before the return statement
   // console.log("===== SPOTIFY PLAYBACK DEBUG =====");
   // console.log("Token available?", !!token);
   // console.log("Current Device ID:", currentDeviceId);
   // console.log("Tracks count:", tracksData.length);
-
-  // Check first track for required properties
-  if (tracksData.length > 0) {
-    const firstTrack = tracksData[0];
-    const track = firstTrack.item || firstTrack.track || firstTrack;
-    // console.log("First track URI:", track.uri);
-    // console.log("First track ID:", track.id);
-    // console.log("Has Spotify URI?", !!track.uri);
-    // console.log("All track properties:", Object.keys(track));
-  }
-
-  // Calculate playable tracks
-  const playableTracks = tracksData.filter(item => {
-    const track = item.item || item.track || item;
-    return !!(token && track.uri && currentDeviceId);
-  });
-  // console.log("Playable tracks with Spotify:", playableTracks.length);
 
   // Add this right before the return statement in MusicCard
   // console.log("===== BEFORE RETURN - CHECKING PLAYBACK CONDITIONS =====");
@@ -587,17 +488,17 @@ const MusicCard = ({ playlistId, token, onTrackSelect, currentDeviceId }) => {
   // console.log("onTrackSelect exists?", !!onTrackSelect);
 
   return (
-    <div className="bg-gradient-to-br from-slate-950 to-slate-900 flex items-center justify-center p-4 h-screen">
-      <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-5 w-[calc(100%-100px)] h-screen shadow-2xl border border-amber-200/10 overflow-hidden flex flex-col">
+    <div className="flex h-full min-h-0 items-center justify-center bg-gradient-to-br from-slate-950 to-slate-900 p-2 pb-44 pt-28 sm:p-4 sm:pb-40 md:pt-4">
+      <div className="flex h-full min-h-0 w-full flex-col overflow-hidden rounded-lg border border-amber-200/10 bg-gradient-to-br from-slate-900 to-slate-800 p-3 shadow-2xl sm:p-5 md:rounded-2xl">
         {/* Header */}
-        <div className="flex justify-between items-center mb-5 pb-3 border-b border-amber-200/20 flex-shrink-0">
+        <div className="mb-3 flex flex-shrink-0 items-center justify-between border-b border-amber-200/20 pb-3 sm:mb-5">
           <h2 className="text-white font-bold text-lg">Playlist</h2>
-          <span className="text-amber-200 text-sm">{tracksData.length} tracks</span>
+          <span className="text-amber-200 text-sm">{tracksToDisplay.length} tracks</span>
         </div>
 
         {/* Track List */}
-        <div className="space-y-2 flex-1 overflow-y-auto custom-scrollbar pr-2">
-          {tracksData.map((item, index) => {
+        <div className="custom-scrollbar flex-1 space-y-2 overflow-y-auto pr-1 sm:pr-2">
+          {tracksToDisplay.map((item, index) => {
             // Try different paths to get track data
             const track = item.item || item.track || item;
             const hasPreview = !!(track.preview_url && track.preview_url.includes('.mp3'));
@@ -609,7 +510,7 @@ const MusicCard = ({ playlistId, token, onTrackSelect, currentDeviceId }) => {
               <div
                 key={track.id || index}
                 onClick={() => isPlayable && handlePlayTrack(item)}
-                className={`group flex items-center gap-3 p-3 rounded-xl transition-all duration-200 ${isPlayable ? 'cursor-pointer' : 'cursor-not-allowed'
+                className={`group flex items-center gap-2 rounded-lg p-2 transition-all duration-200 sm:gap-3 sm:p-3 sm:rounded-xl ${isPlayable ? 'cursor-pointer' : 'cursor-not-allowed'
                   } ${activeTrack === track.id && isPlaying
                     ? 'bg-amber-200/20 border border-amber-200/30'
                     : isPlayable ? 'hover:bg-white/5' : ''
@@ -621,15 +522,15 @@ const MusicCard = ({ playlistId, token, onTrackSelect, currentDeviceId }) => {
 
                 <div className="flex items-center gap-3 flex-1 min-w-0">
                   <img
-                    src={track?.album?.images?.[2]?.url || track?.album?.images?.[0]?.url}
+                    src={track?.album?.images?.[2]?.url || track?.album?.images?.[0]?.url || track?.albumImageUrl}
                     alt="image of song"
-                    className="w-10 h-10 rounded-md object-cover shadow-md flex-shrink-0"
+                    className="h-10 w-10 flex-shrink-0 rounded-md object-cover shadow-md sm:h-11 sm:w-11"
                     onError={(e) => {
                       e.target.src = 'https://via.placeholder.com/40x40?text=No+Image';
                     }}
                   />
                   <div className="flex-1 min-w-0">
-                    <div className="text-white font-medium truncate">
+                    <div className="truncate text-sm font-medium text-white sm:text-base">
                       {track.name}
                       {!isPlayable && (
                         <span className="ml-2 text-red-400 text-xs">(No preview)</span>
@@ -638,19 +539,22 @@ const MusicCard = ({ playlistId, token, onTrackSelect, currentDeviceId }) => {
                       {hasSpotifyPlayback && !hasPreview && (
                         <span className="ml-2 text-green-400 text-xs">(Full track via Spotify)</span>
                       )}
+                      {canControlRoom && !currentDeviceId && (
+                        <span className="ml-2 text-amber-200 text-xs">(Room remote)</span>
+                      )}
                       {activeTrack === track.id && isPlaying && (
                         <span className="ml-2 text-amber-200 text-xs animate-pulse">▶ Playing</span>
                       )}
                     </div>
-                    <div className="text-slate-400 text-sm truncate">
-                      {track.artists?.[0]?.name || 'Unknown Artist'}
+                    <div className="truncate text-xs text-slate-400 sm:text-sm">
+                      {track.artists?.[0]?.name || track.artistName || 'Unknown Artist'}
                     </div>
                   </div>
                 </div>
 
-                <div className="text-slate-400 text-sm font-mono whitespace-nowrap flex-shrink-0">
-                  {Math.floor((track.duration_ms || 0) / 60000)}:
-                  {String(Math.floor(((track.duration_ms || 0) % 60000) / 1000)).padStart(2, "0")}
+                <div className="hidden flex-shrink-0 whitespace-nowrap font-mono text-sm text-slate-400 sm:block">
+                  {Math.floor((track.duration_ms || track.durationMs || 0) / 60000)}:
+                  {String(Math.floor(((track.duration_ms || track.durationMs || 0) % 60000) / 1000)).padStart(2, "0")}
                 </div>
               </div>
             );
@@ -739,7 +643,7 @@ const MusicCard = ({ playlistId, token, onTrackSelect, currentDeviceId }) => {
         </div>
       </div>
 
-      <style jsx>{`
+      <style>{`
         .custom-scrollbar::-webkit-scrollbar {
           width: 6px;
         }

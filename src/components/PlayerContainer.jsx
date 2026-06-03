@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import MusicCard from './MusicCard';
 import WebPlayback from './WebPlayback';
 
-const PlayerContainer = ({ token }) => {
+const PlayerContainer = ({ token, playlistId = "6nqDE6AngPtfuY2JmOILXw" }) => {
   // State variables to store:
   const [currentDeviceId, setCurrentDeviceId] = useState(null);  // Which device to play on
   const [currentTrackUri, setCurrentTrackUri] = useState(null); // Which song to play

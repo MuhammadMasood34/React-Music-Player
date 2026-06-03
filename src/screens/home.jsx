@@ -119,16 +119,18 @@ export default function Home() {
 
     return (
         <Router>
-            <div className="w-screen h-screen bg-blue-200 rounded-xl flex">
-                <Sidebar token={token} />
-                <Routes>
-                    <Route path="/" element={<Feed />} />
-                    <Route path="/library" element={<Library />} />
-                    <Route path="/favorites" element={<Favorites />} />
-                    <Route path="/players" element={<Players />} />
-                    <Route path="/trending" element={<Trending />} />
-                    <Route path="/feed" element={<Feed />} />
-                </Routes>
+            <div className="flex h-dvh w-screen flex-col overflow-hidden bg-blue-200 md:flex-row">
+                <Sidebar />
+                <main className="min-h-0 flex-1 overflow-hidden">
+                    <Routes>
+                        <Route path="/" element={<Feed />} />
+                        <Route path="/library" element={<Library />} />
+                        <Route path="/favorites" element={<Favorites />} />
+                        <Route path="/players" element={<Players />} />
+                        <Route path="/trending" element={<Trending />} />
+                        <Route path="/feed" element={<Feed />} />
+                    </Routes>
+                </main>
             </div>
         </Router>
     );

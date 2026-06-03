@@ -1,99 +1,304 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 
-export default function WebPlayback({ token, onReady, onPlayerStateChange, playlistUris }) {
+const SPOTIFY_SDK_SCRIPT_ID = "spotify-web-playback-sdk";
+const SPOTIFY_PLAYER_GLOBAL_KEY = "__musicplayerSpotifyPlayer";
+const SPOTIFY_DEVICE_GLOBAL_KEY = "__webPlaybackDeviceId";
 
-    const [player, setPlayer] = useState(null);
+const loadSpotifySdk = (onReady) => {
+    window.onSpotifyWebPlaybackSDKReady = onReady;
+
+    if (window.Spotify?.Player) {
+        onReady();
+        return;
+    }
+
+    if (document.getElementById(SPOTIFY_SDK_SCRIPT_ID)) {
+        return;
+    }
+
+    const sdkScript = document.createElement("script");
+    sdkScript.id = SPOTIFY_SDK_SCRIPT_ID;
+    sdkScript.src = "https://sdk.scdn.co/spotify-player.js";
+    sdkScript.async = true;
+    document.body.appendChild(sdkScript);
+};
+
+export default function WebPlayback({
+    token,
+    onReady,
+    onNotReady,
+    onPlayerStateChange,
+    playlistUris,
+    playlistTracks = [],
+    incomingCommand,
+    localTrackCommand,
+    onRoomCommand,
+}) {
+
+    // Removed unused player state variable
     const [deviceId, setDeviceId] = useState(null);
     const [isPaused, setIsPaused] = useState(true);
     const [currentTrack, setCurrentTrack] = useState(null);
     const [isPlayerReady, setIsPlayerReady] = useState(false);
     const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
-    const [currentPlaylist, setCurrentPlaylist] = useState([]);
+    const [volume, setVolume] = useState(0.5); // Volume state (0.0 to 1.0)
+    const currentPlaylist = playlistUris?.length
+        ? playlistUris
+        : playlistTracks.map((track) => track.uri).filter(Boolean);
 
     // Progress bar states
     const [currentPosition, setCurrentPosition] = useState(0);
     const [duration, setDuration] = useState(0);
     const progressIntervalRef = useRef(null);
+    const volumeUpdateTimeoutRef = useRef(null);
     const lastPositionRef = useRef(0);
     const isSeekingRef = useRef(false);
+    //const [volume, setVolume] = useState(0.5); // Volume state (0.0 to 1.0)
 
+    // Refs for objects that need to be consistently updated
     const playerRef = useRef(null);
+    const currentPlaylistRef = useRef(currentPlaylist);
+    const playlistTracksRef = useRef(playlistTracks);
     const lastProcessedStateRef = useRef(null);
     const stateTimeoutRef = useRef(null);
-
     const hasInitialState = useRef(false);
     const lastState = useRef(null);
+    const lastRoomCommandIdRef = useRef(null);
 
-    // FIX: safeSeek as a ref so it's accessible outside onSpotifyWebPlaybackSDKReady
-    const safeSeekRef = useRef(async (ms) => {
-        if (!hasInitialState.current || !lastState.current) return;
-        if (!playerRef.current) return;
-        await playerRef.current.seek(ms);
-    });
+    // Use Spotify Web API for controls because SDK control methods can become unstable after reconnects.
+    const buildDeviceQuery = (deviceIdParam = deviceId) => (
+        deviceIdParam ? `?device_id=${encodeURIComponent(deviceIdParam)}` : ""
+    );
+
+    const normalizeDisplayTrack = (track, fallbackUri = '') => {
+        if (!track) return null;
+        if (track.album || track.artists) return track;
+
+        return {
+            id: track.id || fallbackUri,
+            uri: track.uri || fallbackUri,
+            name: track.name || 'Unknown track',
+            duration_ms: track.duration_ms || track.durationMs || 0,
+            artists: [{ name: track.artistName || 'Unknown Artist' }],
+            album: {
+                images: track.albumImageUrl ? [{ url: track.albumImageUrl }] : [],
+            },
+        };
+    };
+
+    const findPlaylistTrack = (trackUri) => (
+        playlistTracksRef.current.find((track) => track.uri === trackUri)
+    );
+
+    const showTrackFromRoomCommand = (command) => {
+        const nextPlaylist = command.playlistUris?.length ? command.playlistUris : currentPlaylistRef.current;
+        const trackUri = command.trackUri;
+        const track = normalizeDisplayTrack(command.track || findPlaylistTrack(trackUri), trackUri);
+        const index = nextPlaylist.findIndex((uri) => uri === trackUri);
+
+        if (nextPlaylist.length > 0) {
+            currentPlaylistRef.current = nextPlaylist;
+        }
+
+        if (track) {
+            setCurrentTrack(track);
+            setDuration(track.duration_ms || 0);
+        }
+
+        if (index !== -1) {
+            setCurrentTrackIndex(index);
+        }
+
+        const nextPosition = command.positionMs || 0;
+        setCurrentPosition(nextPosition);
+        lastPositionRef.current = nextPosition;
+        setIsPaused(false);
+    };
+
+    const sendSpotifyCommand = async (path, options = {}) => {
+        if (!token) {
+            console.error("No token available for Spotify command");
+            return null;
+        }
+
+        const response = await fetch(`https://api.spotify.com/v1/me/player/${path}`, {
+            ...options,
+            headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+                ...options.headers,
+            },
+        });
+
+        if (!response.ok && response.status !== 204) {
+            let errorDetails = "";
+            try {
+                const error = await response.json();
+                errorDetails = error.error?.message || JSON.stringify(error);
+            } catch {
+                errorDetails = response.statusText;
+            }
+            console.warn(`Spotify command failed (${response.status}): ${errorDetails}`);
+        }
+
+        return response;
+    };
 
     // NEW: handleSeek — seeks by percentage (0.0 to 1.0)
     // Uses lastState.current for duration so no stale closure issues
     const handleSeek = async (percent) => {
-        if (!lastState.current || !lastState.current.track_window?.current_track) return;
+        if (!lastState.current || !lastState.current.track_window?.current_track || !deviceId) return;
         const trackDuration = lastState.current.duration;
         const positionMs = Math.floor(trackDuration * percent);
-        await safeSeekRef.current(positionMs);
+        await sendSpotifyCommand(
+            `seek?position_ms=${positionMs}&device_id=${encodeURIComponent(deviceId)}`,
+            { method: "PUT" }
+        );
+        return positionMs;
     };
+
+    const updateSpotifyVolume = useCallback(async (nextVolume) => {
+        const clampedVolume = Math.max(0, Math.min(1, nextVolume));
+
+        if (!playerRef.current) return;
+
+        if (volumeUpdateTimeoutRef.current) {
+            clearTimeout(volumeUpdateTimeoutRef.current);
+        }
+
+        volumeUpdateTimeoutRef.current = setTimeout(async () => {
+            try {
+                await playerRef.current?.setVolume?.(clampedVolume);
+            } catch (error) {
+                console.warn("Failed to set Spotify SDK volume:", error);
+            }
+        }, 150);
+    }, []);
+
+    const handleVolumeChange = (e) => {
+        const nextVolume = parseFloat(e.target.value);
+        setVolume(nextVolume);
+    };
+
+    const handleVolumeCommit = () => {
+        onRoomCommand?.({
+            type: 'volume',
+            volume,
+        });
+    };
+
+    // Keep Spotify volume in sync when the player/device becomes ready.
+    useEffect(() => {
+        updateSpotifyVolume(volume);
+    }, [updateSpotifyVolume, volume]);
+
+    useEffect(() => {
+        currentPlaylistRef.current = currentPlaylist;
+    }, [playlistUris, playlistTracks]);
+
+    useEffect(() => {
+        playlistTracksRef.current = playlistTracks || [];
+    }, [playlistTracks]);
+
+    function startSmoothProgressUpdates() {
+        if (progressIntervalRef.current) {
+            console.log("Progress interval already running, skipping...");
+            return;
+        }
+
+        console.log("Starting smooth progress updates...");
+
+        progressIntervalRef.current = setInterval(() => {
+            if (isPaused || isSeekingRef.current) {
+                return;
+            }
+
+            setCurrentPosition(prev => {
+                const nextPosition = Math.min(prev + 500, duration);
+                lastPositionRef.current = nextPosition;
+                return nextPosition;
+            });
+        }, 500);
+        
+        console.log("Progress interval started with ID:", progressIntervalRef.current);
+    }
+
+    function stopProgressUpdates() {
+        if (progressIntervalRef.current) {
+            console.log("Stopping progress updates, clearing interval ID:", progressIntervalRef.current);
+            clearInterval(progressIntervalRef.current);
+            progressIntervalRef.current = null;
+        }
+    }
 
 
     useEffect(() => {
         if (!token) return;
 
-        const script = document.createElement("script");
-        script.src = "https://sdk.scdn.co/spotify-player.js";
-        script.async = true;
-        document.body.appendChild(script);
+        let playerInitialized = false;
+        const initializeSpotifyPlayer = () => {
+            if (playerInitialized || !window.Spotify?.Player) return;
+            playerInitialized = true;
 
-        window.onSpotifyWebPlaybackSDKReady = () => {
+            if (window[SPOTIFY_PLAYER_GLOBAL_KEY]) {
+                console.log("Reusing existing Spotify Web Playback player...");
+                const spotifyPlayer = window[SPOTIFY_PLAYER_GLOBAL_KEY];
+                playerRef.current = spotifyPlayer;
+                window.__webPlaybackActivateElement = () => {
+                    return spotifyPlayer.activateElement?.();
+                };
+
+                const existingDeviceId = window[SPOTIFY_DEVICE_GLOBAL_KEY];
+                if (existingDeviceId) {
+                    setDeviceId(existingDeviceId);
+                    setIsPlayerReady(true);
+                    onReady?.(existingDeviceId);
+                }
+
+                spotifyPlayer.addListener("player_state_changed", (state) => {
+                    if (!state) return;
+
+                    hasInitialState.current = true;
+                    lastState.current = state;
+                    setCurrentTrack(state.track_window.current_track);
+                    setIsPaused(state.paused);
+                    setDuration(state.duration);
+                    setCurrentPosition(state.position);
+                    lastPositionRef.current = state.position;
+                    onPlayerStateChange?.(state);
+                });
+
+                spotifyPlayer.addListener("not_ready", ({ device_id }) => {
+                    if (window[SPOTIFY_DEVICE_GLOBAL_KEY] === device_id) {
+                        delete window[SPOTIFY_DEVICE_GLOBAL_KEY];
+                    }
+                    setDeviceId(null);
+                    setIsPlayerReady(false);
+                    stopProgressUpdates();
+                    onNotReady?.(device_id);
+                });
+
+                return;
+            }
+
             console.log("Spotify SDK ready, creating player...");
 
             const spotifyPlayer = new window.Spotify.Player({
                 name: "My Music Player",
                 getOAuthToken: (cb) => cb(token),
-                volume: 0.5,
+                volume: volume, // Use volume state
             });
+            window[SPOTIFY_PLAYER_GLOBAL_KEY] = spotifyPlayer;
 
             // NEW: start playback as soon as player is ready
             spotifyPlayer.addListener("ready", async ({ device_id }) => {
                 console.log("=== PLAYER READY ===");
                 console.log("Player ready with Device ID:", device_id);
                 console.log("Playlist URIs available:", playlistUris?.length);
-                
+                window[SPOTIFY_DEVICE_GLOBAL_KEY] = device_id;
+
                 setDeviceId(device_id);
                 setIsPlayerReady(true);
-
-                // Transfer playback to this device
-                try {
-                    const response = await fetch(`https://api.spotify.com/v1/me/player`, {
-                        method: 'PUT',
-                        headers: {
-                            'Authorization': `Bearer ${token}`,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            "device_ids": [device_id],
-                            "play": false
-                        })
-                    });
-                    console.log("Playback transfer response:", response.status);
-                } catch (err) {
-                    console.error("Error transferring playback:", err);
-                }
-                
-                console.log("Playback transferred to this device");
-
-                // NEW: start playback immediately after device is ready
-                if (playlistUris && playlistUris.length > 0) {
-                    console.log("Starting playback with playlist URIs...");
-                    await startPlayback(device_id);
-                } else {
-                    console.log("No playlist URIs available for auto-start");
-                }
 
                 if (onReady) onReady(device_id);
             });
@@ -145,8 +350,8 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
                             lastPositionRef.current = position;
                         }
 
-                        if (currentPlaylist.length > 0 && state.track_window.current_track?.uri) {
-                            const index = currentPlaylist.findIndex(uri => uri === state.track_window.current_track.uri);
+                        if (currentPlaylistRef.current.length > 0 && state.track_window.current_track?.uri) {
+                            const index = currentPlaylistRef.current.findIndex(uri => uri === state.track_window.current_track.uri);
                             if (index !== -1 && index !== currentTrackIndex) {
                                 setCurrentTrackIndex(index);
                             }
@@ -167,14 +372,17 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
 
             spotifyPlayer.addListener("account_error", ({ message }) => {
                 console.error("Account Error:", message);
-                alert("Spotify Premium is required for playback");
             });
 
             spotifyPlayer.addListener("not_ready", ({ device_id }) => {
                 console.log("Device has gone offline:", device_id);
+                if (window[SPOTIFY_DEVICE_GLOBAL_KEY] === device_id) {
+                    delete window[SPOTIFY_DEVICE_GLOBAL_KEY];
+                }
+                setDeviceId(null);
                 setIsPlayerReady(false);
                 stopProgressUpdates();
-                playerRef.current = null;
+                onNotReady?.(device_id);
             });
 
             spotifyPlayer.addListener("playback_error", ({ message }) => {
@@ -185,40 +393,45 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
                 if (success) {
                     console.log("🎉 WebPlayback CONNECTED successfully!");
 
-                    spotifyPlayer.getCurrentState().then(state => {
-                        if (!state) {
-                            console.error('User is not playing music through the Web Playback SDK');
-                            return;
-                        }
-
-                        var current_track = state.track_window.current_track;
-                        var next_track = state.track_window.next_tracks[0];
-
-                        console.log('Currently Playing', current_track);
-                        console.log('Playing Next', next_track);
-                    });
                 } else {
                     console.error("❌ WebPlayback connection FAILED");
                 }
             });
 
-            setPlayer(spotifyPlayer);
             playerRef.current = spotifyPlayer;
+            window.__webPlaybackActivateElement = () => {
+                return spotifyPlayer.activateElement?.();
+            };
         };
+
+        loadSpotifySdk(initializeSpotifyPlayer);
 
         return () => {
             if (stateTimeoutRef.current) {
                 clearTimeout(stateTimeoutRef.current);
             }
+            if (volumeUpdateTimeoutRef.current) {
+                clearTimeout(volumeUpdateTimeoutRef.current);
+            }
             stopProgressUpdates();
             if (playerRef.current) {
-                playerRef.current.disconnect();
-                playerRef.current = null;
-            } else if (player) {
-                player.disconnect();
+                [
+                    "ready",
+                    "player_state_changed",
+                    "initialization_error",
+                    "authentication_error",
+                    "account_error",
+                    "not_ready",
+                    "playback_error",
+                ].forEach((eventName) => {
+                    playerRef.current?.removeListener?.(eventName);
+                });
             }
-            if (script.parentNode) {
-                script.parentNode.removeChild(script);
+            // FIX: use ref for cleanup — state may already be stale by the time
+            // the cleanup function runs (common with async SDK initialization)
+            playerRef.current = null;
+            if (window.__webPlaybackActivateElement) {
+                delete window.__webPlaybackActivateElement;
             }
         };
     }, [token]);
@@ -227,128 +440,24 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
     useEffect(() => {
         console.log("Progress effect triggered:", { isPaused, isPlayerReady, duration, hasPlayerRef: !!playerRef.current });
         
-        if (!isPaused && isPlayerReady && playerRef.current && duration > 0) {
+        if (!isPaused && duration > 0) {
             console.log("Starting progress updates...");
             startSmoothProgressUpdates();
         } else {
             console.log("Stopping progress updates (conditions not met)");
             stopProgressUpdates();
         }
-
+    
         return () => {
             stopProgressUpdates();
         };
-    }, [isPaused, isPlayerReady, duration]);
+    }, [isPaused, isPlayerReady, duration]); // Using playerRef.current inside effect, not in deps
 
 
     // NEW: startPlayback — wraps /me/player/play, called on ready
-    const startPlayback = async (device_id) => {
-        if (!playlistUris || playlistUris.length === 0) return;
-
-        try {
-            const response = await fetch(
-                `https://api.spotify.com/v1/me/player/play?device_id=${device_id}`,
-                {
-                    method: "PUT",
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                        "Content-Type": "application/json",
-                    },
-                    body: JSON.stringify({
-                        uris: playlistUris,
-                        offset: { position: 0 },
-                    }),
-                }
-            );
-            if (response.ok) {
-                console.log("Playback started via startPlayback()");
-            } else {
-                const err = await response.json();
-                console.error("startPlayback failed:", err);
-            }
-        } catch (error) {
-            console.error("Error in startPlayback:", error);
-        }
-    };
-
-
-    const startSmoothProgressUpdates = () => {
-        if (progressIntervalRef.current) {
-            console.log("Progress interval already running, skipping...");
-            return;
-        }
-
-        console.log("Starting smooth progress updates...");
-
-        progressIntervalRef.current = setInterval(async () => {
-            const activePlayer = playerRef.current;
-            
-            if (!activePlayer) {
-                console.warn("No active player in progress update");
-                return;
-            }
-            
-            if (isPaused || isSeekingRef.current) {
-                return;
-            }
-
-            try {
-                const state = await activePlayer.getCurrentState();
-                
-                if (!state) {
-                    console.warn("No state returned from getCurrentState");
-                    return;
-                }
-                
-                if (state.paused || isSeekingRef.current) {
-                    return;
-                }
-
-                const newPosition = state.position;
-                
-                // Update position in state
-                setCurrentPosition(prev => {
-                    // Update if difference is significant or this is first update
-                    if (prev === 0 || Math.abs(newPosition - prev) > 50) {
-                        console.log(`Progress: ${Math.floor(newPosition / 1000)}s`);
-                        return newPosition;
-                    }
-                    return prev;
-                });
-
-                if (state.track_window) {
-                    var current_track = state.track_window.current_track;
-                    var next_track = state.track_window.next_tracks[0];
-
-                    // Log every 30 seconds
-                    if (Math.floor(Date.now() / 1000) % 30 === 0) {
-                        console.log('Currently Playing (progress update):', current_track?.name);
-                        if (next_track) {
-                            console.log('Playing Next (progress update):', next_track?.name);
-                        }
-                    }
-                }
-            } catch (err) {
-                console.warn("Error getting player state in progress update:", err);
-            }
-        }, 500);
-        
-        console.log("Progress interval started with ID:", progressIntervalRef.current);
-    };
-
-
-    const stopProgressUpdates = () => {
-        if (progressIntervalRef.current) {
-            console.log("Stopping progress updates, clearing interval ID:", progressIntervalRef.current);
-            clearInterval(progressIntervalRef.current);
-            progressIntervalRef.current = null;
-        }
-    };
-
-
     // UPDATED: handleProgressBarClick now uses handleSeek(percent) internally
     const handleProgressBarClick = async (e) => {
-        if (!player || !isPlayerReady || !lastState.current) return;
+        if (!isPlayerReady || !lastState.current || !deviceId) return;
 
         const progressBar = e.currentTarget;
         const rect = progressBar.getBoundingClientRect();
@@ -361,21 +470,13 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
 
         try {
             // NEW: delegate to handleSeek(percent) instead of safeSeekRef directly
-            await handleSeek(percent);
-
-            const seekPosition = Math.floor((lastState.current?.duration ?? 0) * percent);
+            const seekPosition = await handleSeek(percent);
             setCurrentPosition(seekPosition);
             lastPositionRef.current = seekPosition;
-
-            if (playerRef.current) {
-                const state = await playerRef.current.getCurrentState();
-                if (state && state.track_window) {
-                    var current_track = state.track_window.current_track;
-                    var next_track = state.track_window.next_tracks[0];
-                    console.log('After seek - Currently Playing:', current_track?.name);
-                    console.log('After seek - Playing Next:', next_track?.name);
-                }
-            }
+            onRoomCommand?.({
+                type: 'seek',
+                positionMs: seekPosition,
+            });
 
             setTimeout(() => {
                 isSeekingRef.current = false;
@@ -385,14 +486,6 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
             isSeekingRef.current = false;
         }
     };
-
-    useEffect(() => {
-        if (playlistUris && playlistUris.length > 0) {
-            setCurrentPlaylist(playlistUris);
-            console.log("Playlist loaded with", playlistUris.length, "tracks");
-        }
-    }, [playlistUris]);
-
 
     const handlePlay = async (trackUri, contextUris = null, deviceIdParam = null) => {
         const activeDeviceId = deviceIdParam || deviceId;
@@ -421,22 +514,7 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
                 console.log("Single track playback started");
                 setCurrentPosition(0);
                 lastPositionRef.current = 0;
-
-                if (playerRef.current) {
-                    setTimeout(async () => {
-                        try {
-                            const state = await playerRef.current?.getCurrentState();
-                            if (state && state.track_window) {
-                                var current_track = state.track_window.current_track;
-                                var next_track = state.track_window.next_tracks[0];
-                                console.log('After playback start - Currently Playing:', current_track?.name);
-                                console.log('After playback start - Playing Next:', next_track?.name);
-                            }
-                        } catch (err) {
-                            console.warn("Error fetching state after play:", err);
-                        }
-                    }, 1000);
-                }
+                setIsPaused(false);
 
             } else {
                 const error = await response.json();
@@ -447,78 +525,166 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
         }
     };
 
+    const executeRoomCommand = async (command) => {
+        if (!command) return false;
 
-    const togglePlay = async () => {
-        console.log("togglePlay called, playerRef.current:", playerRef.current ? "EXISTS" : "NULL", "isPlayerReady:", isPlayerReady);
-        
-        if (!playerRef.current) {
-            console.error("Player reference is null");
-            return;
+        if (command.type === 'playTrack') {
+            showTrackFromRoomCommand(command);
+
+            if (deviceId && isPlayerReady) {
+                await handlePlay(command.trackUri, command.playlistUris, deviceId);
+            }
+
+            if (deviceId && isPlayerReady && typeof command.positionMs === 'number' && command.positionMs > 0) {
+                await sendSpotifyCommand(
+                    `seek?position_ms=${command.positionMs}&device_id=${encodeURIComponent(deviceId)}`,
+                    { method: "PUT" }
+                );
+            }
+
+            return true;
         }
 
+        if (command.type === 'play' || command.type === 'pause') {
+            setIsPaused(command.type === 'pause');
+
+            if (deviceId && isPlayerReady) {
+                await sendSpotifyCommand(`${command.type}${buildDeviceQuery()}`, { method: "PUT" });
+            }
+
+            return true;
+        }
+
+        if (command.type === 'seek' && typeof command.positionMs === 'number') {
+            setCurrentPosition(command.positionMs);
+            lastPositionRef.current = command.positionMs;
+
+            if (deviceId && isPlayerReady) {
+                await sendSpotifyCommand(
+                    `seek?position_ms=${command.positionMs}&device_id=${encodeURIComponent(deviceId)}`,
+                    { method: "PUT" }
+                );
+            }
+
+            return true;
+        }
+
+        if (command.type === 'next' || command.type === 'previous') {
+            if (deviceId && isPlayerReady) {
+                await sendSpotifyCommand(`${command.type}${buildDeviceQuery()}`, { method: "POST" });
+            }
+            setCurrentPosition(0);
+            lastPositionRef.current = 0;
+            return true;
+        }
+
+        if (command.type === 'volume' && typeof command.volume === 'number') {
+            setVolume(Math.max(0, Math.min(1, command.volume)));
+            return true;
+        }
+
+        return true;
+    };
+
+    useEffect(() => {
+        if (!incomingCommand || incomingCommand.id === lastRoomCommandIdRef.current) return;
+
+        window.setTimeout(() => {
+            executeRoomCommand(incomingCommand).then((handled) => {
+                if (handled) {
+                    lastRoomCommandIdRef.current = incomingCommand.id;
+                }
+            });
+        }, 0);
+    }, [incomingCommand, deviceId, isPlayerReady]);
+
+    useEffect(() => {
+        if (!localTrackCommand || localTrackCommand.id === lastRoomCommandIdRef.current) return;
+
+        showTrackFromRoomCommand(localTrackCommand);
+        lastRoomCommandIdRef.current = localTrackCommand.id;
+    }, [localTrackCommand]);
+
+
+    const togglePlay = async () => {
+        console.log("togglePlay called, isPlayerReady:", isPlayerReady, "isPaused:", isPaused);
+        const command = isPaused ? "play" : "pause";
+    
         if (!isPlayerReady) {
+            if (onRoomCommand) {
+                onRoomCommand({ type: command });
+                setIsPaused(!isPaused);
+            }
             console.warn("Player not ready yet");
             return;
         }
-
+    
         try {
-            console.log("Attempting to get player state before toggle...");
-            const state = await playerRef.current.getCurrentState();
-            
-            console.log("Current state:", {
-                hasTrack: !!state?.track_window?.current_track,
-                trackName: state?.track_window?.current_track?.name,
-                paused: state?.paused
-            });
+            const response = await sendSpotifyCommand(`${command}${buildDeviceQuery()}`, { method: "PUT" });
 
-            if (!state || !state.track_window?.current_track) {
-                console.warn("No track is currently available to play");
-                return;
+            if (response?.ok || response?.status === 204) {
+                setIsPaused(!isPaused);
+                onRoomCommand?.({
+                    type: command,
+                });
             }
-
-            console.log("Calling togglePlay on player...");
-            await playerRef.current.togglePlay();
-            console.log("Toggle play successful!");
             
         } catch (error) {
             console.error("Error in togglePlay:", error);
         }
     };
 
+    const playPlaylistTrack = async (trackUri, playlist = currentPlaylistRef.current) => {
+        const track = findPlaylistTrack(trackUri);
+        const command = {
+            type: 'playTrack',
+            trackUri,
+            playlistUris: playlist,
+            track,
+            positionMs: 0,
+        };
+
+        showTrackFromRoomCommand(command);
+
+        if (deviceId && isPlayerReady) {
+            await handlePlay(trackUri, playlist, deviceId);
+        }
+
+        onRoomCommand?.(command);
+    };
+
+    const playAdjacentTrack = async (direction) => {
+        const playlist = currentPlaylistRef.current.length > 0
+            ? currentPlaylistRef.current
+            : currentPlaylist;
+
+        if (playlist.length === 0) {
+            onRoomCommand?.({ type: direction });
+
+            if (deviceId && isPlayerReady) {
+                await sendSpotifyCommand(`${direction}${buildDeviceQuery()}`, { method: "POST" });
+                setCurrentPosition(0);
+                lastPositionRef.current = 0;
+            }
+
+            return;
+        }
+
+        const activeUri = currentTrack?.uri;
+        const activeIndex = playlist.findIndex((uri) => uri === activeUri);
+        const baseIndex = activeIndex === -1 ? currentTrackIndex : activeIndex;
+        const offset = direction === 'next' ? 1 : -1;
+        const nextIndex = (baseIndex + offset + playlist.length) % playlist.length;
+
+        await playPlaylistTrack(playlist[nextIndex], playlist);
+    };
+
     const nextTrack = async () => {
         console.log("nextTrack called");
-        
-        if (!playerRef.current) {
-            console.error("Player reference is null");
-            return;
-        }
-
-        if (!isPlayerReady) {
-            console.warn("Player not ready yet");
-            return;
-        }
 
         try {
-            console.log("Calling nextTrack...");
-            await playerRef.current.nextTrack();
-            
+            await playAdjacentTrack('next');
             console.log("Next track requested successfully");
-            setCurrentPosition(0);
-            lastPositionRef.current = 0;
-
-            setTimeout(async () => {
-                try {
-                    const state = await playerRef.current.getCurrentState();
-                    if (state && state.track_window) {
-                        var current_track = state.track_window.current_track;
-                        var next_track = state.track_window.next_tracks[0];
-                        console.log('After next track - Currently Playing:', current_track?.name);
-                        console.log('After next track - Playing Next:', next_track?.name);
-                    }
-                } catch (err) {
-                    console.error("Error fetching state after next track:", err);
-                }
-            }, 500);
         } catch (error) {
             console.error("Error switching to next track:", error);
         }
@@ -526,38 +692,10 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
 
     const prevTrack = async () => {
         console.log("prevTrack called");
-        
-        if (!playerRef.current) {
-            console.error("Player reference is null");
-            return;
-        }
-
-        if (!isPlayerReady) {
-            console.warn("Player not ready yet");
-            return;
-        }
 
         try {
-            console.log("Calling previousTrack...");
-            await playerRef.current.previousTrack();
-            
+            await playAdjacentTrack('previous');
             console.log("Previous track requested successfully");
-            setCurrentPosition(0);
-            lastPositionRef.current = 0;
-
-            setTimeout(async () => {
-                try {
-                    const state = await playerRef.current.getCurrentState();
-                    if (state && state.track_window) {
-                        var current_track = state.track_window.current_track;
-                        var next_track = state.track_window.next_tracks[0];
-                        console.log('After previous track - Currently Playing:', current_track?.name);
-                        console.log('After previous track - Playing Next:', next_track?.name);
-                    }
-                } catch (err) {
-                    console.error("Error fetching state after previous track:", err);
-                }
-            }, 500);
         } catch (error) {
             console.error("Error switching to previous track:", error);
         }
@@ -571,6 +709,7 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
     };
 
     const progressPercentage = duration > 0 ? (currentPosition / duration) * 100 : 0;
+    const currentTrackImageUrl = currentTrack?.album?.images?.[0]?.url || currentTrack?.albumImageUrl;
 
     React.useEffect(() => {
         if (onReady && deviceId) {
@@ -582,13 +721,13 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
 
 
     return (
-        <div className="fixed bottom-0 w-full bg-[#1E2A3E] p-4 flex items-center justify-evenly z-50 shadow-lg">
+        <div className="fixed inset-x-0 bottom-0 z-50 flex flex-col gap-3 bg-[#1E2A3E] p-3 shadow-lg md:flex-row md:items-center md:justify-evenly md:p-4">
             {/* Track Info */}
-            <div className="flex items-center gap-4 flex-1 min-w-0">
-                {currentTrack?.album?.images?.[0]?.url && (
+            <div className="flex min-w-0 flex-1 items-center gap-3 md:gap-4">
+                {currentTrackImageUrl && (
                     <img
-                        src={currentTrack.album.images[0].url}
-                        className="w-[56px] h-[56px] rounded-lg object-cover shadow-md"
+                        src={currentTrackImageUrl}
+                        className="h-12 w-12 shrink-0 rounded-lg object-cover shadow-md md:h-14 md:w-14"
                         alt="Album art"
                     />
                 )}
@@ -601,7 +740,7 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
             </div>
 
             {/* Progress Bar Section */}
-            <div className="flex flex-col items-center gap-2 flex-1 max-w-[400px]">
+            <div className="flex w-full flex-col items-center gap-2 md:max-w-[400px] md:flex-1">
                 <div
                     className="w-full relative cursor-pointer group"
                     onClick={handleProgressBarClick}
@@ -621,33 +760,51 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
                     <span>{formatDuration(duration)}</span>
                 </div>
 
-                <div className="flex items-center gap-6 mt-1">
+                <div className="mt-1 flex w-full flex-wrap items-center justify-center gap-4 sm:gap-6">
                     <button
                         onClick={prevTrack}
-                        className="text-white text-2xl hover:text-amber-200 transition-colors"
-                        disabled={!isPlayerReady}
+                        className="text-2xl text-white transition-colors hover:text-amber-200"
+                        disabled={!isPlayerReady && !onRoomCommand}
                     >
                         ⏮
                     </button>
                     <button
                         onClick={togglePlay}
-                        className="bg-amber-200 text-slate-900 w-12 h-12 rounded-full flex items-center justify-center text-xl hover:scale-105 transition-transform"
-                        disabled={!isPlayerReady}
+                        className="flex h-11 w-11 items-center justify-center rounded-full bg-amber-200 text-xl text-slate-900 transition-transform hover:scale-105 md:h-12 md:w-12"
+                        disabled={!isPlayerReady && !onRoomCommand}
                     >
                         {isPaused ? "▶" : "⏸"}
                     </button>
                     <button
                         onClick={nextTrack}
-                        className="text-white text-2xl hover:text-amber-200 transition-colors"
-                        disabled={!isPlayerReady}
+                        className="text-2xl text-white transition-colors hover:text-amber-200"
+                        disabled={!isPlayerReady && !onRoomCommand}
                     >
                         ⏭
                     </button>
+                    
+                    {/* Volume Control */}
+                    <div className="hidden items-center gap-2 sm:flex">
+                        <span className="text-gray-400 text-xs">🔊</span>
+                        <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value={volume}
+                            onInput={handleVolumeChange}
+                            onChange={handleVolumeChange}
+                            onPointerUp={handleVolumeCommit}
+                            onKeyUp={handleVolumeCommit}
+                            className="w-24"
+                        ></input>
+                        <span className="text-gray-400 text-xs">{Math.round(volume * 100)}%</span>
+                    </div>
                 </div>
             </div>
 
             {/* Track counter */}
-            <div className="w-20 text-right">
+            <div className="absolute right-3 top-3 text-right md:static md:w-20">
                 {currentPlaylist.length > 0 && (
                     <div className="text-gray-500 text-xs">
                         {currentTrackIndex + 1}/{currentPlaylist.length}
@@ -657,469 +814,3 @@ export default function WebPlayback({ token, onReady, onPlayerStateChange, playl
         </div>
     );
 }
-
-// import React, { useState, useEffect, useRef } from "react";
-
-// export default function WebPlayback({ token, onReady, onPlayerStateChange, playlistUris }) {
-
-    
-
-//     const [player, setPlayer] = useState(null);
-//     const [deviceId, setDeviceId] = useState(null);
-//     const [isPaused, setIsPaused] = useState(true);
-//     const [currentTrack, setCurrentTrack] = useState(null);
-//     const [isPlayerReady, setIsPlayerReady] = useState(false);
-//     const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
-//     const [currentPlaylist, setCurrentPlaylist] = useState([]);
-
-//     // Progress bar states
-//     const [currentPosition, setCurrentPosition] = useState(0);
-//     const [duration, setDuration] = useState(0);
-//     const progressIntervalRef = useRef(null);
-//     const lastPositionRef = useRef(0);
-//     const isSeekingRef = useRef(false);
-
-//     // FIX: playerRef always holds the latest player — intervals/closures read this
-//     // instead of the stale state snapshot that caused getCurrentState() to crash
-//     const playerRef = useRef(null);
-
-//     // Track last processed state to prevent duplicates
-//     const lastProcessedStateRef = useRef(null);
-//     const stateTimeoutRef = useRef(null);
-
-
-
-
-//     useEffect(() => {
-//         if (!token) return;
-//         // if (!window?.onSpotifyWebPlaybackSDKReady) return;
-
-//         // Load Spotify SDK script
-//         const script = document.createElement("script");
-//         script.src = "https://sdk.scdn.co/spotify-player.js";
-//         script.async = true;
-//         document.body.appendChild(script);
-
-//         window.onSpotifyWebPlaybackSDKReady = () => {
-//             console.log("Spotify SDK ready, creating player...");
-
-//             const spotifyPlayer = new window.Spotify.Player({
-//                 name: "My Music Player",
-//                 getOAuthToken: (cb) => cb(token),
-//                 volume: 0.5,
-//             });
-
-//             spotifyPlayer.addListener("ready", ({ device_id }) => {
-//                 console.log("Player ready with Device ID:", device_id);
-//                 setDeviceId(device_id);
-//                 setIsPlayerReady(true);
-
-//                 fetch(`https://api.spotify.com/v1/me/player`, {
-//                     method: 'PUT',
-//                     headers: {
-//                         'Authorization': `Bearer ${token}`,
-//                         'Content-Type': 'application/json'
-//                     },
-//                     body: JSON.stringify({
-//                         "device_ids": [device_id],
-//                         "play": false
-//                     })
-//                 }).then(() => {
-//                     console.log("Playback transferred to this device");
-//                 });
-
-//                 if (onReady) onReady(device_id);
-//             });
-
-//             // Handle player state changes
-//             spotifyPlayer.addListener("player_state_changed", (state) => {
-//                 if (!state) return;
-
-//                 // Clear previous timeout
-//                 if (stateTimeoutRef.current) {
-//                     clearTimeout(stateTimeoutRef.current);
-//                 }
-
-//                 // Debounce state changes
-//                 stateTimeoutRef.current = setTimeout(() => {
-//                     const trackId = state.track_window.current_track?.id;
-//                     const isPausedState = state.paused;
-//                     const position = state.position;
-//                     const trackDuration = state.duration;
-
-//                     // Create unique key for this state
-//                     const stateKey = `${trackId}-${isPausedState}-${Math.floor(position / 1000)}`;
-
-//                     // Only process if state has changed
-//                     if (lastProcessedStateRef.current !== stateKey) {
-//                         lastProcessedStateRef.current = stateKey;
-
-//                         console.log("Now playing:", state.track_window.current_track?.name);
-//                         setCurrentTrack(state.track_window.current_track);
-//                         setIsPaused(state.paused);
-
-//                         // Update duration when track changes
-//                         if (trackDuration !== duration) {
-//                             setDuration(trackDuration);
-//                         }
-
-//                         // Update current position (not while seeking)
-//                         if (!isSeekingRef.current) {
-//                             setCurrentPosition(position);
-//                             lastPositionRef.current = position;
-//                         }
-
-//                         if (currentPlaylist.length > 0 && state.track_window.current_track?.uri) {
-//                             const index = currentPlaylist.findIndex(uri => uri === state.track_window.current_track.uri);
-//                             if (index !== -1 && index !== currentTrackIndex) {
-//                                 setCurrentTrackIndex(index);
-//                             }
-//                         }
-
-//                         if (onPlayerStateChange) onPlayerStateChange(state);
-//                     }
-//                 }, 50);
-//             });
-
-//             spotifyPlayer.addListener("initialization_error", ({ message }) => {
-//                 console.error("Initialization Error:", message);
-//             });
-
-//             spotifyPlayer.addListener("authentication_error", ({ message }) => {
-//                 console.error("Authentication Error:", message);
-//             });
-
-//             spotifyPlayer.addListener("account_error", ({ message }) => {
-//                 console.error("Account Error:", message);
-//                 alert("Spotify Premium is required for playback");
-//             });
-
-//             spotifyPlayer.addListener("not_ready", ({ device_id }) => {
-//                 console.log("Device has gone offline:", device_id);
-//                 setIsPlayerReady(false);
-//                 stopProgressUpdates();
-//                 // FIX: clear ref so interval cannot call getCurrentState on dead player
-//                 playerRef.current = null;
-//             });
-
-//             spotifyPlayer.addListener("playback_error", ({ message }) => {
-//                 console.error("Playback Error:", message);
-//             });
-
-//             spotifyPlayer.connect().then(success => {
-//                 if (success) {
-//                     console.log("🎉 WebPlayback CONNECTED successfully!");
-//                 } else {
-//                     console.error("❌ WebPlayback connection FAILED");
-//                 }
-//             });
-
-//             // FIX: set BOTH state (for React renders) AND ref (for closures/intervals)
-//             setPlayer(spotifyPlayer);
-//             playerRef.current = spotifyPlayer;
-//         };
-
-
-//         return () => {
-//             if (stateTimeoutRef.current) {
-//                 clearTimeout(stateTimeoutRef.current);
-//             }
-//             stopProgressUpdates();
-//             // FIX: use ref for cleanup — state may already be stale by the time
-//             // the cleanup function runs (common with async SDK initialization)
-//             if (playerRef.current) {
-//                 playerRef.current.disconnect();
-//                 playerRef.current = null;
-//             } else if (player) {
-//                 player.disconnect();
-//             }
-//             if (script.parentNode) {
-//                 script.parentNode.removeChild(script);
-//             }
-//         };
-//     }, [token]);
-
-//     // SMOOTH PROGRESS UPDATES - Runs every frame (60fps)
-
-//     useEffect(() => {
-//         if (!isPaused && isPlayerReady && player && duration > 0) {
-//             startSmoothProgressUpdates();
-//         } else {
-//             stopProgressUpdates();
-//         }
-
-//         return () => {
-//             stopProgressUpdates();
-//         };
-//     }, [isPaused, isPlayerReady, player, duration]);
-
-
-
-//     const startSmoothProgressUpdates = () => {
-//         if (progressIntervalRef.current) return;
-
-//         progressIntervalRef.current = setInterval(async () => {
-//             // FIX: read from playerRef.current — this is always the live object.
-//             // Reading `player` (state) here would capture a stale closure snapshot
-//             // from when this interval was created, causing getCurrentState() to crash
-//             // after the SDK reconnects and creates a new internal player object.
-//             const activePlayer = playerRef.current;
-//             if (!activePlayer || isPaused || isSeekingRef.current) return;
-
-//             try {
-//                 const state = await activePlayer?.getCurrentState();
-//                 if (state && !state.paused && !isSeekingRef.current) {
-//                     const newPosition = state.position;
-//                     setCurrentPosition(prev => {
-//                         if (Math.abs(newPosition - prev) > 50) return newPosition;
-//                         return prev;
-//                     });
-//                 }
-//             } catch (err) {
-//                 // FIX: if player died mid-interval, stop polling instead of
-//                 // silently ignoring — prevents a cascade of errors
-//                 stopProgressUpdates();
-//             }
-//         }, 500); // Poll every 500ms — smooth enough for a progress bar
-//     };
-
-
-//     const stopProgressUpdates = () => {
-//         if (progressIntervalRef.current) {
-//             clearInterval(progressIntervalRef.current);
-//             progressIntervalRef.current = null;
-//         }
-//     };
-
-//     // Handle progress bar click for seeking
-//     const handleProgressBarClick = async (e) => {
-//         if (!player || !isPlayerReady) return;
-
-//         const progressBar = e.currentTarget;
-//         const rect = progressBar.getBoundingClientRect();
-//         const clickX = e.clientX - rect.left;
-//         const percentage = Math.max(0, Math.min(1, clickX / rect.width));
-//         const seekPosition = percentage * duration;
-
-//         console.log(`Seeking to ${formatDuration(seekPosition)} (${percentage * 100}%)`);
-
-//         // Set seeking flag to prevent conflicts
-//         isSeekingRef.current = true;
-
-//         try {
-//             // Perform the seek
-//             await player.seek(seekPosition);
-//             setCurrentPosition(seekPosition);
-//             lastPositionRef.current = seekPosition;
-
-//             // Small delay to ensure seek completes
-//             setTimeout(() => {
-//                 isSeekingRef.current = false;
-//             }, 200);
-//         } catch (error) {
-//             console.error("Error seeking:", error);
-//             isSeekingRef.current = false;
-//         }
-//     };
-
-//     useEffect(() => {
-//         if (playlistUris && playlistUris.length > 0) {
-//             setCurrentPlaylist(playlistUris);
-//             console.log("Playlist loaded with", playlistUris.length, "tracks");
-//         }
-//     }, [playlistUris]);
-
-
-
-//     const handlePlay = async (trackUri, contextUris = null, deviceIdParam = null) => {
-//         const activeDeviceId = deviceIdParam || deviceId;
-
-//         if (!activeDeviceId) {
-//             console.error("No device ID available");
-//             return;
-//         }
-
-//         const uris = (contextUris && contextUris.length > 0) ? contextUris : [trackUri];
-//         try {
-//             const response = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${activeDeviceId}`, {
-//                 method: "PUT",
-//                 headers: {
-//                     Authorization: `Bearer ${token}`,
-//                     "Content-Type": "application/json",
-//                 },
-
-//                 body: JSON.stringify({
-//                     uris: uris,           // ✅ was: urisToPlay (undefined)
-//                     offset: { uri: trackUri }, //
-//                 })
-//             });
-
-//             if (response.ok) {
-//                 console.log("Single track playback started");
-//                 // Reset position for new track
-//                 setCurrentPosition(0);
-//                 lastPositionRef.current = 0;
-
-//             } else {
-//                 const error = await response.json();
-//                 console.error("Failed to start playback:", error);
-//             }
-//         } catch (error) {
-//             console.error("Error in handlePlay:", error);
-//         }
-//     }
-
-
-//     const togglePlay = () => {
-//         if (!player || !isPlayerReady) {
-//             console.warn("Player not ready yet");
-//             return;
-//         }
-
-//         player.togglePlay()
-//             .then(() => {
-//                 console.log("Toggle play successful");
-//             })
-//             .catch(error => {
-//                 console.error("Error toggling play:", error);
-//             });
-//     };
-
-//     const nextTrack = () => {
-//         if (!player || !isPlayerReady) {
-//             console.warn("Player not ready yet");
-//             return;
-//         }
-
-//         player.nextTrack()
-//             .then(() => {
-//                 console.log("Next track requested");
-//                 // Reset position for new track
-//                 setCurrentPosition(0);
-//                 lastPositionRef.current = 0;
-//             })
-//             .catch(error => {
-//                 console.error("Error switching to next track:", error);
-//             });
-//     };
-
-//     const prevTrack = () => {
-//         if (!player || !isPlayerReady) {
-//             console.warn("Player not ready yet");
-//             return;
-//         }
-
-//         player.previousTrack()
-//             .then(() => {
-//                 console.log("Previous track requested");
-//                 // Reset position for new track
-//                 setCurrentPosition(0);
-//                 lastPositionRef.current = 0;
-//             })
-//             .catch(error => {
-//                 console.error("Error switching to previous track:", error);
-//             });
-//     };
-
-//     const formatDuration = (ms) => {
-//         if (!ms || isNaN(ms)) return "0:00";
-//         const minutes = Math.floor(ms / 60000);
-//         const seconds = Math.floor((ms % 60000) / 1000);
-//         return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-//     };
-
-//     // Calculate progress percentage
-//     const progressPercentage = duration > 0 ? (currentPosition / duration) * 100 : 0;
-
-//     React.useEffect(() => {
-//         if (onReady && deviceId) {
-//             if (window.__webPlaybackHandlePlay) {
-//                 window.__webPlaybackHandlePlay = handlePlay;
-//             }
-//         }
-//     }, [deviceId, token]);
-
-
-    
-
-//     return (
-//         <div className="fixed bottom-0 w-full bg-[#1E2A3E] p-4 flex items-center justify-evenly z-50 shadow-lg">
-//             {/* Track Info */}
-//             <div className="flex items-center gap-4 flex-1 min-w-0">
-//                 {currentTrack?.album?.images?.[0]?.url && (
-//                     <img
-//                         src={currentTrack.album.images[0].url}
-//                         className="w-[56px] h-[56px] rounded-lg object-cover shadow-md"
-//                         alt="Album art"
-//                     />
-//                 )}
-//                 <div className="min-w-0 flex-1">
-//                     <p className="text-white font-bold truncate">{currentTrack?.name ?? "No track playing"}</p>
-//                     <p className="text-gray-400 text-sm truncate">
-//                         {currentTrack?.artists?.map(a => a.name).join(", ") ?? "Select a song to play"}
-//                     </p>
-//                 </div>
-//             </div>
-
-//             {/* Progress Bar Section */}
-//             <div className="flex flex-col items-center gap-2 flex-1 max-w-[400px]">
-//                 <div
-//                     className="w-full relative cursor-pointer group"
-//                     onClick={handleProgressBarClick}
-//                 >
-//                     {/* Background bar */}
-//                     <div className="w-full h-1.5 bg-gray-600 rounded-full overflow-hidden">
-//                         {/* Progress fill */}
-//                         <div
-//                             className="h-full bg-amber-200 rounded-full transition-all duration-75 relative"
-//                             style={{ width: `${progressPercentage}%` }}
-//                         >
-//                             {/* Progress handle/knob - shows on hover */}
-//                             <div className="absolute right-0 top-1/2 transform -translate-y-1/2 w-3 h-3 bg-amber-200 rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-lg" style={{ right: '-4px' }}></div>
-//                         </div>
-//                     </div>
-//                 </div>
-
-//                 {/* Time indicators */}
-//                 <div className="flex justify-between w-full text-xs text-gray-400">
-//                     <span>{formatDuration(currentPosition)}</span>
-//                     <span>{formatDuration(duration)}</span>
-//                 </div>
-
-//                 {/* Controls */}
-//                 <div className="flex items-center gap-6 mt-1">
-//                     <button
-//                         onClick={prevTrack}
-//                         className="text-white text-2xl hover:text-amber-200 transition-colors"
-//                         disabled={!isPlayerReady}
-//                     >
-//                         ⏮
-//                     </button>
-//                     <button
-//                         onClick={togglePlay}
-//                         className="bg-amber-200 text-slate-900 w-12 h-12 rounded-full flex items-center justify-center text-xl hover:scale-105 transition-transform"
-//                         disabled={!isPlayerReady}
-//                     >
-//                         {isPaused ? "▶" : "⏸"}
-//                     </button>
-//                     <button
-//                         onClick={nextTrack}
-//                         className="text-white text-2xl hover:text-amber-200 transition-colors"
-//                         disabled={!isPlayerReady}
-//                     >
-//                         ⏭
-//                     </button>
-//                 </div>
-//             </div>
-
-//             {/* Track counter */}
-//             <div className="w-20 text-right">
-//                 {currentPlaylist.length > 0 && (
-//                     <div className="text-gray-500 text-xs">
-//                         {currentTrackIndex + 1}/{currentPlaylist.length}
-//                     </div>
-//                 )}
-//             </div>
-//         </div>
-//     );
-// }

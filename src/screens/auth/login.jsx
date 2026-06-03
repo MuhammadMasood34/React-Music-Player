@@ -23,9 +23,3 @@ export default function Login() {
     </>
   )
 }
-
-
-// import { loginWithSpotify } from "../../../spotify.js";
-
-// // your button:
-<button onClick={loginWithSpotify}>Login with Spotify</button>

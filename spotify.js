@@ -82,8 +82,8 @@
 
 import axios from "axios";
 
-const clientID = "c6061922bd924f2ebde2ecce0cac4de9";
-const redirectURI = "http://127.0.0.1:5173/";
+const clientID = import.meta.env.VITE_SPOTIFY_CLIENT_ID || "c6061922bd924f2ebde2ecce0cac4de9";
+const redirectURI = import.meta.env.VITE_SPOTIFY_REDIRECT_URI || `${window.location.origin}/`;
 const scopes = ["user-library-read", "playlist-read-private","streaming","user-read-email","user-read-private","user-modify-playback-state","user-read-playback-state"];
 
 // Generate random string for code verifier
