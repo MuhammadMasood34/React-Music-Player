@@ -255,6 +255,14 @@ export default function WebPlayback({
                     onReady?.(existingDeviceId);
                 }
 
+                spotifyPlayer.addListener("ready", ({ device_id }) => {
+                    console.log("Player ready with Device ID:", device_id);
+                    window[SPOTIFY_DEVICE_GLOBAL_KEY] = device_id;
+                    setDeviceId(device_id);
+                    setIsPlayerReady(true);
+                    onReady?.(device_id);
+                });
+
                 spotifyPlayer.addListener("player_state_changed", (state) => {
                     if (!state) return;
 

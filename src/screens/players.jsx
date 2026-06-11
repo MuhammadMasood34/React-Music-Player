@@ -101,23 +101,26 @@ import React, { useState, useEffect, useCallback, useRef } from 'react'
 import Screencontainer from '../shared/screencontainer'
 import MusicCard from '../components/MusicCard'
 import { useLocation } from 'react-router-dom'
-import WebPlayback from '../components/WebPlayback'
-import useRoomSync from '../hooks/useRoomSync'
 
-export default function Players() {
+export default function Players({
+  token,
+  currentDeviceId,
+  setCurrentDeviceId,
+  setIsPlaying,
+  setPlaylistUris,
+  playlistTracks,
+  setPlaylistTracks,
+  setLocalTrackCommand,
+  roomSync,
+}) {
   const location = useLocation();
   const selectedPlaylistId = location.state?.playlistId || "6nqDE6AngPtfuY2JmOILXw";
 
-  const [token] = useState(() => localStorage.getItem('token'));
-  const [currentDeviceId, setCurrentDeviceId] = useState(null);
-  const [, setIsPlaying] = useState(false);
   const [joinCode, setJoinCode] = useState('');
-  const [localTrackCommand, setLocalTrackCommand] = useState(null);
   const {
     roomCode,
     userCount,
     sharedPlaylist,
-    incomingCommand,
     error: roomError,
     isConnected: roomConnected,
     createRoom,
@@ -125,30 +128,11 @@ export default function Players() {
     leaveRoom,
     sendPlaylist,
     sendCommand,
-  } = useRoomSync();
+  } = roomSync;
 
   useEffect(() => {
     console.log("Token in Players:", token ? "Present" : "Missing");
   }, [token]);
-
-  const handleWebPlaybackReady = (deviceId) => {
-    console.log("✅ WebPlayback READY callback received! Device ID:", deviceId);
-    setCurrentDeviceId(deviceId);
-  };
-
-  const handleWebPlaybackNotReady = (deviceId) => {
-    console.warn("WebPlayback device went offline:", deviceId);
-    setCurrentDeviceId((activeDeviceId) => (
-      activeDeviceId === deviceId ? null : activeDeviceId
-    ));
-  };
-
-  const handlePlayerStateChange = (state) => {
-    // console.log("Player state changed:", state);
-    if (state) {
-      setIsPlaying(!state.paused);
-    }
-  };
 
   // In Players.jsx, modify handleTrackSelect
   // In Players.jsx - Update handleTrackSelect
@@ -290,9 +274,6 @@ export default function Players() {
       alert(error.message || "Failed to play track");
     }
   };
-
-  const [playlistUris, setPlaylistUris] = useState([]);
-  const [playlistTracks, setPlaylistTracks] = useState([]);
   const playlistSignatureRef = useRef('');
 
   // Add this function to receive playlist URIs from MusicCard
@@ -308,7 +289,7 @@ export default function Players() {
     if (roomCode && tracks.length > 0) {
       sendPlaylist(tracks);
     }
-  }, [roomCode, sendPlaylist]);
+  }, [roomCode, sendPlaylist, setPlaylistTracks, setPlaylistUris]);
 
   useEffect(() => {
     if (roomCode && playlistTracks.length > 0) {
@@ -384,20 +365,6 @@ export default function Players() {
           </>
         )}
       </div>
-
-      {token && (
-        <WebPlayback
-          token={token}
-          onReady={handleWebPlaybackReady}
-          onNotReady={handleWebPlaybackNotReady}
-          onPlayerStateChange={handlePlayerStateChange}
-          playlistUris={playlistUris.length > 0 ? playlistUris : sharedPlaylist.map((track) => track.uri).filter(Boolean)}
-          playlistTracks={sharedPlaylist.length > 0 ? sharedPlaylist : playlistTracks}
-          incomingCommand={incomingCommand}
-          localTrackCommand={localTrackCommand}
-          onRoomCommand={sendCommand}
-        />
-      )}
 
       <MusicCard
         playlistId={selectedPlaylistId}
