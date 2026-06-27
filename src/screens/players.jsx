@@ -1,123 +1,29 @@
-// import React, { useState, useEffect } from 'react'
-// import Screencontainer from '../shared/screencontainer'
-// import MusicCard from '../components/MusicCard'
-// import { useLocation } from 'react-router-dom'
-// import WebPlayback from '../components/WebPlayback'
-
-// export default function Players() {
-//   const location = useLocation();
-//   const selectedPlaylistId = location.state?.playlistId || "6nqDE6AngPtfuY2JmOILXw";
-
-//   const [token, setToken] = useState(null);
-//   const [currentDeviceId, setCurrentDeviceId] = useState(null);
-//   const [isPlaying, setIsPlaying] = useState(false);
-
-//   useEffect(() => {
-//     const storedToken = localStorage.getItem('token');
-//     console.log("Token in Players:", storedToken ? "Present" : "Missing");
-//     if (storedToken) {
-//       setToken(storedToken);
-//     }
-//   }, []);
-
-//   const handleWebPlaybackReady = (deviceId) => {
-//     console.log("✅ WebPlayback READY callback received! Device ID:", deviceId);
-//     setCurrentDeviceId(deviceId);
-//   };
-
-//   const handlePlayerStateChange = (state) => {
-//     // console.log("Player state changed:", state);
-//     if (state) {
-//       setIsPlaying(!state.paused);
-//     }
-//   };
-
-//   const handleTrackSelect = async (trackUri, deviceId) => {
-//     console.log("Playing track URI:", trackUri);
-//     console.log("Using device ID:", deviceId);
-
-//     if (!token) {
-//       console.error("No token available");
-//       alert("Please login again");
-//       return;
-//     }
-
-//     if (!deviceId) {
-//       console.error("No device ID available");
-//       alert("Player is not ready. Please wait a moment.");
-//       return;
-//     }
-
-//     try {
-//       const response = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
-//         method: 'PUT',
-//         body: JSON.stringify({ uris: [trackUri] }),
-//         headers: {
-//           'Content-Type': 'application/json',
-//           'Authorization': `Bearer ${token}`
-//         },
-//       });
-
-//       if (response.ok) {
-//         console.log("Playback started successfully");
-//         setIsPlaying(true);
-//       } else {
-//         const error = await response.json();
-//         console.error("Failed to start playback:", error);
-//         if (response.status === 403) {
-//           alert("Spotify Premium is required for playback");
-//         } else {
-//           alert(`Failed to play track: ${error.error?.message || 'Unknown error'}`);
-//         }
-//       }
-//     } catch (error) {
-//       console.error("Error playing track:", error);
-//       alert("Failed to play track");
-//     }
-//   };
-
-//   return (
-//     <Screencontainer>
-//       {token && (
-//         <WebPlayback 
-//           token={token}
-//           onReady={handleWebPlaybackReady}
-//           onPlayerStateChange={handlePlayerStateChange}
-//         />
-//       )}
-
-//       <MusicCard
-//         playlistId={selectedPlaylistId}
-//         token={token}
-//         currentDeviceId={currentDeviceId}
-//         onTrackSelect={handleTrackSelect}
-//       />
-//     </Screencontainer>
-//   )
-// }
-
-
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import Screencontainer from '../shared/screencontainer'
 import MusicCard from '../components/MusicCard'
+import DemoMusicCard from '../components/DemoMusicCard'
 import { useLocation } from 'react-router-dom'
-import WebPlayback from '../components/WebPlayback'
-import useRoomSync from '../hooks/useRoomSync'
 
-export default function Players() {
+export default function Players({
+  token,
+  currentDeviceId,
+  setCurrentDeviceId,
+  setIsPlaying,
+  setPlaylistUris,
+  playlistTracks,
+  setPlaylistTracks,
+  setLocalTrackCommand,
+  roomSync,
+  isDemoMode = false,
+}) {
   const location = useLocation();
   const selectedPlaylistId = location.state?.playlistId || "6nqDE6AngPtfuY2JmOILXw";
 
-  const [token] = useState(() => localStorage.getItem('token'));
-  const [currentDeviceId, setCurrentDeviceId] = useState(null);
-  const [, setIsPlaying] = useState(false);
   const [joinCode, setJoinCode] = useState('');
-  const [localTrackCommand, setLocalTrackCommand] = useState(null);
   const {
     roomCode,
     userCount,
     sharedPlaylist,
-    incomingCommand,
     error: roomError,
     isConnected: roomConnected,
     createRoom,
@@ -125,30 +31,11 @@ export default function Players() {
     leaveRoom,
     sendPlaylist,
     sendCommand,
-  } = useRoomSync();
+  } = roomSync;
 
   useEffect(() => {
     console.log("Token in Players:", token ? "Present" : "Missing");
   }, [token]);
-
-  const handleWebPlaybackReady = (deviceId) => {
-    console.log("✅ WebPlayback READY callback received! Device ID:", deviceId);
-    setCurrentDeviceId(deviceId);
-  };
-
-  const handleWebPlaybackNotReady = (deviceId) => {
-    console.warn("WebPlayback device went offline:", deviceId);
-    setCurrentDeviceId((activeDeviceId) => (
-      activeDeviceId === deviceId ? null : activeDeviceId
-    ));
-  };
-
-  const handlePlayerStateChange = (state) => {
-    // console.log("Player state changed:", state);
-    if (state) {
-      setIsPlaying(!state.paused);
-    }
-  };
 
   // In Players.jsx, modify handleTrackSelect
   // In Players.jsx - Update handleTrackSelect
@@ -291,8 +178,23 @@ export default function Players() {
     }
   };
 
-  const [playlistUris, setPlaylistUris] = useState([]);
-  const [playlistTracks, setPlaylistTracks] = useState([]);
+  // Demo mode track select handler
+  const handleDemoTrackSelect = (trackUri, _deviceId, playlistUris, track) => {
+    console.log("Demo: Playing track URI:", trackUri);
+
+    const command = {
+      type: 'playTrack',
+      trackUri,
+      playlistUris: playlistUris || [],
+      track,
+      positionMs: 0,
+      id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+    };
+
+    setLocalTrackCommand(command);
+    sendCommand(command);
+  };
+
   const playlistSignatureRef = useRef('');
 
   // Add this function to receive playlist URIs from MusicCard
@@ -308,7 +210,7 @@ export default function Players() {
     if (roomCode && tracks.length > 0) {
       sendPlaylist(tracks);
     }
-  }, [roomCode, sendPlaylist]);
+  }, [roomCode, sendPlaylist, setPlaylistTracks, setPlaylistUris]);
 
   useEffect(() => {
     if (roomCode && playlistTracks.length > 0) {
@@ -349,6 +251,11 @@ export default function Players() {
               <p className="text-white">{userCount}</p>
             </div>
             <div className={`h-2 w-2 rounded-full ${roomConnected ? 'bg-emerald-400' : 'bg-red-400'}`} />
+            {isDemoMode && (
+              <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                DEMO
+              </span>
+            )}
             <button
               type="button"
               onClick={leaveRoom}
@@ -385,29 +292,25 @@ export default function Players() {
         )}
       </div>
 
-      {token && (
-        <WebPlayback
+      {/* Render DemoMusicCard for demo mode, regular MusicCard for Spotify users */}
+      {isDemoMode ? (
+        <DemoMusicCard
+          onTrackSelect={handleDemoTrackSelect}
+          onPlaylistLoaded={handlePlaylistLoaded}
+          sharedTracks={sharedPlaylist}
+          canControlRoom={!!roomCode}
+        />
+      ) : (
+        <MusicCard
+          playlistId={selectedPlaylistId}
           token={token}
-          onReady={handleWebPlaybackReady}
-          onNotReady={handleWebPlaybackNotReady}
-          onPlayerStateChange={handlePlayerStateChange}
-          playlistUris={playlistUris.length > 0 ? playlistUris : sharedPlaylist.map((track) => track.uri).filter(Boolean)}
-          playlistTracks={sharedPlaylist.length > 0 ? sharedPlaylist : playlistTracks}
-          incomingCommand={incomingCommand}
-          localTrackCommand={localTrackCommand}
-          onRoomCommand={sendCommand}
+          currentDeviceId={currentDeviceId}
+          onTrackSelect={handleTrackSelect}
+          onPlaylistLoaded={handlePlaylistLoaded}
+          sharedTracks={sharedPlaylist}
+          canControlRoom={!!roomCode}
         />
       )}
-
-      <MusicCard
-        playlistId={selectedPlaylistId}
-        token={token}
-        currentDeviceId={currentDeviceId}
-        onTrackSelect={handleTrackSelect}
-        onPlaylistLoaded={handlePlaylistLoaded}
-        sharedTracks={sharedPlaylist}
-        canControlRoom={!!roomCode}
-      />
     </Screencontainer>
   )
 }
