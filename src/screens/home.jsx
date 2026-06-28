@@ -5,7 +5,6 @@ import Library from "./library";
 import Favorites from "./favorites";
 import Players from "./players";
 import Trending from "./trending";
-import Feed from "./feed";
 import Sidebar from "../components/sidebar";
 import Login from "./auth/login";
 import WebPlayback from "../components/WebPlayback";
@@ -107,15 +106,6 @@ export default function Home() {
             <div className="flex h-dvh w-screen flex-col overflow-hidden bg-blue-200 md:flex-row">
                 <Sidebar isDemoMode={isDemoMode} onSignOut={handleSignOut} />
 
-                {/* Demo Mode Exit Button */}
-                {isDemoMode && (
-                    <button
-                        onClick={handleExitDemoMode}
-                        className="fixed left-3 top-3 z-[60] rounded-lg bg-slate-800/90 px-3 py-1.5 text-xs font-medium text-emerald-300 shadow-lg backdrop-blur hover:bg-slate-700 md:left-auto md:right-3"
-                    >
-                        Exit Demo Mode
-                    </button>
-                )}
 
                 <main className="min-h-0 flex-1 overflow-hidden">
                     <Routes>
@@ -150,7 +140,6 @@ export default function Home() {
                         <Route path="/library" element={<Library />} />
                         <Route path="/favorites" element={<Favorites token={token} isDemoMode={isDemoMode} />} />
                         <Route path="/trending" element={<Trending token={token} isDemoMode={isDemoMode} />} />
-                        <Route path="/feed" element={<Feed token={token} isDemoMode={isDemoMode} />} />
                     </Routes>
                 </main>
 
