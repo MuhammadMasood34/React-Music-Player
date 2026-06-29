@@ -10,8 +10,10 @@ export default function DemoPlayback({
     playlistTracks: externalTracks,
     playlistUris: externalUris,
     incomingCommand,
+    incomingProgress,
     localTrackCommand,
     onRoomCommand,
+    onSendProgress,
 }) {
     const [isPaused, setIsPaused] = useState(true);
     const [currentTrack, setCurrentTrack] = useState(null);
@@ -267,6 +269,65 @@ export default function DemoPlayback({
         }
         lastRoomCommandIdRef.current = localTrackCommand.id;
     }, [localTrackCommand, loadAndPlayTrack]);
+
+    // Send progress updates to room every 2 seconds while playing
+    useEffect(() => {
+        if (isPaused || !currentTrack || !onSendProgress) return;
+
+        const progressBroadcast = setInterval(() => {
+            if (audioRef.current && !audioRef.current.paused) {
+                onSendProgress({
+                    positionMs: Math.floor(audioRef.current.currentTime * 1000),
+                    duration: duration,
+                    trackUri: currentTrack?.uri || '',
+                    isPaused: false,
+                });
+            }
+        }, 2000);
+
+        return () => clearInterval(progressBroadcast);
+    }, [isPaused, currentTrack, duration, onSendProgress]);
+
+    // Receive progress updates from other room members
+    useEffect(() => {
+        if (!incomingProgress) return;
+
+        // Update position from remote user's progress
+        const { positionMs, duration: remoteDuration, trackUri, isPaused: remoteIsPaused } = incomingProgress;
+
+        // If the remote is playing a different track, try to switch to it
+        if (trackUri && currentTrack?.uri !== trackUri) {
+            const track = findDemoTrack(trackUri);
+            if (track?.audioSrc) {
+                loadAndPlayTrack(track, positionMs || 0);
+                return;
+            }
+        }
+
+        // Sync position — only adjust if difference is > 3 seconds (avoid jitter)
+        if (typeof positionMs === 'number' && audioRef.current) {
+            const localPos = audioRef.current.currentTime * 1000;
+            const diff = Math.abs(localPos - positionMs);
+            if (diff > 3000) {
+                audioRef.current.currentTime = positionMs / 1000;
+                setCurrentPosition(positionMs);
+            }
+        }
+
+        // Sync duration if we don't have it
+        if (remoteDuration && !duration) {
+            setDuration(remoteDuration);
+        }
+
+        // Sync play/pause state
+        if (remoteIsPaused && !isPaused && audioRef.current) {
+            audioRef.current.pause();
+            setIsPaused(true);
+        } else if (!remoteIsPaused && isPaused && audioRef.current && currentTrack) {
+            audioRef.current.play().catch(console.warn);
+            setIsPaused(false);
+        }
+    }, [incomingProgress]);
 
     // Helpers
     const formatDuration = (ms) => {

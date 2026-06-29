@@ -72,6 +72,7 @@ export default function useRoomSync() {
   const clientIdRef = useRef(createClientId());
   const [roomCode, setRoomCode] = useState('');
   const [incomingCommand, setIncomingCommand] = useState(null);
+  const [incomingProgress, setIncomingProgress] = useState(null);
   const [userCount, setUserCount] = useState(0);
   const [sharedPlaylist, setSharedPlaylist] = useState([]);
   const [error, setError] = useState('');
@@ -116,11 +117,17 @@ export default function useRoomSync() {
       setError('Could not connect to room server');
     };
 
+    const handleProgress = (progress) => {
+      if (!progress || progress.sourceId === clientIdRef.current) return;
+      setIncomingProgress(progress);
+    };
+
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('connect_error', handleConnectError);
     socket.on('room:state', handleState);
     socket.on('room:command', handleCommand);
+    socket.on('room:progress', handleProgress);
 
     return () => {
       socket.off('connect', handleConnect);
@@ -128,6 +135,7 @@ export default function useRoomSync() {
       socket.off('connect_error', handleConnectError);
       socket.off('room:state', handleState);
       socket.off('room:command', handleCommand);
+      socket.off('room:progress', handleProgress);
       socket.disconnect();
     };
   }, [socket]);
@@ -225,11 +233,22 @@ export default function useRoomSync() {
     });
   }, [roomCode, socket]);
 
+  const sendProgress = useCallback((progressData) => {
+    if (!roomCode || !progressData) return;
+
+    socket.emit('room:progress', {
+      roomCode,
+      clientId: clientIdRef.current,
+      ...progressData,
+    });
+  }, [roomCode, socket]);
+
   return {
     roomCode,
     userCount,
     sharedPlaylist,
     incomingCommand,
+    incomingProgress,
     error,
     isConnected,
     connectRoomServer,
@@ -238,5 +257,6 @@ export default function useRoomSync() {
     leaveRoom,
     sendPlaylist,
     sendCommand,
+    sendProgress,
   };
 }

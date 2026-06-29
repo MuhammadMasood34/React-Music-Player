@@ -226,6 +226,22 @@ export const initializeRoomSocket = (httpServer: HttpServer): Server => {
             }
         })
 
+        // Lightweight progress sync — broadcasts position without saving to DB
+        socket.on('room:progress', (payload: { roomCode?: string; clientId?: string; positionMs?: number; duration?: number; trackUri?: string; isPaused?: boolean }) => {
+            if (!payload.roomCode || !payload.clientId) return
+
+            const code = normalizeRoomCode(payload.roomCode)
+            socket.to(code).emit('room:progress', {
+                positionMs: payload.positionMs ?? 0,
+                duration: payload.duration ?? 0,
+                trackUri: payload.trackUri ?? '',
+                isPaused: payload.isPaused ?? true,
+                sourceId: payload.clientId,
+                roomCode: code,
+                sentAt: Date.now()
+            })
+        })
+
         socket.on('room:command', async (payload: RoomCommandPayload, callback?: AckCallback) => {
             try {
                 if (!payload.roomCode || !payload.clientId || !payload.command?.type) {

@@ -149,8 +149,10 @@ export default function Home() {
                         playlistTracks={roomSync.sharedPlaylist.length > 0 ? roomSync.sharedPlaylist : DEMO_TRACKS}
                         playlistUris={sharedPlaylistUris.length > 0 ? sharedPlaylistUris : DEMO_PLAYLIST_URIS}
                         incomingCommand={roomSync.incomingCommand}
+                        incomingProgress={roomSync.incomingProgress}
                         localTrackCommand={localTrackCommand}
                         onRoomCommand={roomSync.sendCommand}
+                        onSendProgress={roomSync.sendProgress}
                     />
                 ) : (
                     <WebPlayback
@@ -161,8 +163,10 @@ export default function Home() {
                         playlistUris={playlistUris.length > 0 ? playlistUris : sharedPlaylistUris}
                         playlistTracks={roomSync.sharedPlaylist.length > 0 ? roomSync.sharedPlaylist : playlistTracks}
                         incomingCommand={roomSync.incomingCommand}
+                        incomingProgress={roomSync.incomingProgress}
                         localTrackCommand={localTrackCommand}
                         onRoomCommand={roomSync.sendCommand}
+                        onSendProgress={roomSync.sendProgress}
                     />
                 )}
             </div>

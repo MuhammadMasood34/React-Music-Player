@@ -31,8 +31,10 @@ export default function WebPlayback({
     playlistUris,
     playlistTracks = [],
     incomingCommand,
+    incomingProgress,
     localTrackCommand,
     onRoomCommand,
+    onSendProgress,
 }) {
 
     // Removed unused player state variable
@@ -612,6 +614,50 @@ export default function WebPlayback({
         showTrackFromRoomCommand(localTrackCommand);
         lastRoomCommandIdRef.current = localTrackCommand.id;
     }, [localTrackCommand]);
+
+    // Send progress updates to room every 2 seconds while playing
+    useEffect(() => {
+        if (isPaused || !currentTrack || !onSendProgress) return;
+
+        const progressBroadcast = setInterval(() => {
+            if (!isPaused && duration > 0) {
+                onSendProgress({
+                    positionMs: lastPositionRef.current,
+                    duration: duration,
+                    trackUri: currentTrack?.uri || '',
+                    isPaused: false,
+                });
+            }
+        }, 2000);
+
+        return () => clearInterval(progressBroadcast);
+    }, [isPaused, currentTrack, duration, onSendProgress]);
+
+    // Receive progress updates from other room members
+    useEffect(() => {
+        if (!incomingProgress) return;
+
+        const { positionMs, duration: remoteDuration, isPaused: remoteIsPaused } = incomingProgress;
+
+        // Sync position — only adjust if difference is > 3 seconds (avoid jitter)
+        if (typeof positionMs === 'number') {
+            const diff = Math.abs(lastPositionRef.current - positionMs);
+            if (diff > 3000) {
+                setCurrentPosition(positionMs);
+                lastPositionRef.current = positionMs;
+            }
+        }
+
+        // Sync duration if available
+        if (remoteDuration && !duration) {
+            setDuration(remoteDuration);
+        }
+
+        // Sync play/pause state
+        if (typeof remoteIsPaused === 'boolean' && remoteIsPaused !== isPaused) {
+            setIsPaused(remoteIsPaused);
+        }
+    }, [incomingProgress]);
 
 
     const togglePlay = async () => {
