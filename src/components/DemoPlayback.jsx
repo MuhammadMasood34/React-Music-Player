@@ -14,6 +14,7 @@ export default function DemoPlayback({
     localTrackCommand,
     onRoomCommand,
     onSendProgress,
+    userCount,
 }) {
     const [isPaused, setIsPaused] = useState(true);
     const [currentTrack, setCurrentTrack] = useState(null);
@@ -288,6 +289,39 @@ export default function DemoPlayback({
         return () => clearInterval(progressBroadcast);
     }, [isPaused, currentTrack, duration, onSendProgress]);
 
+    // When a new user joins the room (userCount increases), immediately send current state
+    const prevUserCountRef = useRef(0);
+    useEffect(() => {
+        if (!userCount || !onSendProgress || !currentTrack) return;
+
+        if (userCount > prevUserCountRef.current && prevUserCountRef.current > 0) {
+            // New user joined — send immediate state snapshot
+            const positionMs = audioRef.current
+                ? Math.floor(audioRef.current.currentTime * 1000)
+                : 0;
+
+            // Send 3 rapid updates to ensure the new joiner gets it
+            onSendProgress({ positionMs, duration, trackUri: currentTrack.uri, isPaused });
+            setTimeout(() => {
+                onSendProgress({ positionMs: audioRef.current ? Math.floor(audioRef.current.currentTime * 1000) : positionMs, duration, trackUri: currentTrack.uri, isPaused });
+            }, 500);
+            setTimeout(() => {
+                onSendProgress({ positionMs: audioRef.current ? Math.floor(audioRef.current.currentTime * 1000) : positionMs, duration, trackUri: currentTrack.uri, isPaused });
+            }, 1200);
+
+            // Also send a room command to ensure track is loaded on the new joiner
+            onRoomCommand?.({
+                type: 'playTrack',
+                trackUri: currentTrack.uri,
+                track: currentTrack,
+                positionMs: audioRef.current ? Math.floor(audioRef.current.currentTime * 1000) : 0,
+                playlistUris,
+            });
+        }
+
+        prevUserCountRef.current = userCount;
+    }, [userCount]);
+
     // Receive progress updates from other room members
     useEffect(() => {
         if (!incomingProgress) return;
@@ -304,11 +338,11 @@ export default function DemoPlayback({
             }
         }
 
-        // Sync position — only adjust if difference is > 3 seconds (avoid jitter)
+        // Sync position — only adjust if difference is > 1.5 seconds (smoother sync, less jitter)
         if (typeof positionMs === 'number' && audioRef.current) {
             const localPos = audioRef.current.currentTime * 1000;
             const diff = Math.abs(localPos - positionMs);
-            if (diff > 3000) {
+            if (diff > 1500) {
                 audioRef.current.currentTime = positionMs / 1000;
                 setCurrentPosition(positionMs);
             }

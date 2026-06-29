@@ -35,6 +35,7 @@ export default function WebPlayback({
     localTrackCommand,
     onRoomCommand,
     onSendProgress,
+    userCount,
 }) {
 
     // Removed unused player state variable
@@ -633,16 +634,47 @@ export default function WebPlayback({
         return () => clearInterval(progressBroadcast);
     }, [isPaused, currentTrack, duration, onSendProgress]);
 
+    // When a new user joins the room (userCount increases), immediately send current state
+    const prevUserCountRef = useRef(0);
+    useEffect(() => {
+        if (!userCount || !onSendProgress || !currentTrack) return;
+
+        if (userCount > prevUserCountRef.current && prevUserCountRef.current > 0) {
+            // New user joined — send immediate state snapshot + room command
+            const positionMs = lastPositionRef.current;
+
+            // Send 3 rapid progress updates so new joiner gets it
+            onSendProgress({ positionMs, duration, trackUri: currentTrack.uri, isPaused });
+            setTimeout(() => {
+                onSendProgress({ positionMs: lastPositionRef.current, duration, trackUri: currentTrack.uri, isPaused });
+            }, 500);
+            setTimeout(() => {
+                onSendProgress({ positionMs: lastPositionRef.current, duration, trackUri: currentTrack.uri, isPaused });
+            }, 1200);
+
+            // Also send a playTrack command so the new joiner loads the correct track
+            onRoomCommand?.({
+                type: 'playTrack',
+                trackUri: currentTrack.uri,
+                track: currentTrack,
+                positionMs: lastPositionRef.current,
+                playlistUris: currentPlaylistRef.current,
+            });
+        }
+
+        prevUserCountRef.current = userCount;
+    }, [userCount]);
+
     // Receive progress updates from other room members
     useEffect(() => {
         if (!incomingProgress) return;
 
         const { positionMs, duration: remoteDuration, isPaused: remoteIsPaused } = incomingProgress;
 
-        // Sync position — only adjust if difference is > 3 seconds (avoid jitter)
+        // Sync position — only adjust if difference is > 1.5 seconds (smoother sync, less jitter)
         if (typeof positionMs === 'number') {
             const diff = Math.abs(lastPositionRef.current - positionMs);
-            if (diff > 3000) {
+            if (diff > 1500) {
                 setCurrentPosition(positionMs);
                 lastPositionRef.current = positionMs;
             }

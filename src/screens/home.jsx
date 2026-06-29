@@ -153,6 +153,7 @@ export default function Home() {
                         localTrackCommand={localTrackCommand}
                         onRoomCommand={roomSync.sendCommand}
                         onSendProgress={roomSync.sendProgress}
+                        userCount={roomSync.userCount}
                     />
                 ) : (
                     <WebPlayback
@@ -167,6 +168,7 @@ export default function Home() {
                         localTrackCommand={localTrackCommand}
                         onRoomCommand={roomSync.sendCommand}
                         onSendProgress={roomSync.sendProgress}
+                        userCount={roomSync.userCount}
                     />
                 )}
             </div>
